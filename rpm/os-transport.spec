@@ -3,7 +3,7 @@ Version:        %{version}
 Release:        %{release}
 Summary:        OS transport layer shared library
 License:        MIT
-BuildArch:      %{build_arch}  # 从build.sh传递的架构参数，不再写死
+BuildArch:      %{build_arch}
 Requires:       glibc >= 2.17
 
 %description
@@ -28,16 +28,20 @@ Only header files for os-transport, used for external project compilation.
 cp -r %{install_root}/* %{buildroot}/
 
 # ========== 主包文件（运行库） ==========
+# 注释移到独立行，避免rpmbuild解析错误
+# 完整版本库
+# 主版本软链接
+# 编译链接用软链接
 %files
 %defattr(-,root,root)
-/usr/lib64/libos_transport.so.%{version}        # 完整版本库
-/usr/lib64/libos_transport.so.%{version_major}  # 主版本软链接
-/usr/lib64/libos_transport.so                   # 编译链接用软链接
+/usr/lib64/libos_transport.so.%{version}
+/usr/lib64/libos_transport.so.%{version_major}
+/usr/lib64/libos_transport.so
 
 # ========== devel包文件（仅头文件） ==========
 %files devel
 %defattr(-,root,root)
-/usr/include/os-transport/os_transport.h        # 仅头文件
+/usr/include/os-transport/os_transport.h
 
 # ========== 触发ldconfig更新库缓存 ==========
 %post -p /sbin/ldconfig
