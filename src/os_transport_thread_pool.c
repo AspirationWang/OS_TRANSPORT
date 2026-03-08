@@ -3,6 +3,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <pthread.h>
+#include <stdbool.h>
 
 // 初始化单个任务队列
 static int task_queue_init(TaskQueue* queue, uint32_t cap) {

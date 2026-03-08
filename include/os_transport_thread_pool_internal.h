@@ -5,6 +5,16 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+// Fix: Explicitly define the TRANSPORT_LOG macro (thread-safe, compatible with all source files)
+#define TRANSPORT_LOG(level, fmt, ...) \
+    do { \
+        fprintf(stderr, "[%s][%s:%d] " fmt "\n", level, __FILE__, __LINE__, ##__VA_ARGS__); \
+    } while(0)
+
+#endif // OS_TRANSPORT_INTERNAL_H
 
 // 任务队列结构体（每个线程类型对应1个队列）
 typedef struct {
