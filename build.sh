@@ -9,7 +9,6 @@ ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 BUILD_DIR="${ROOT_DIR}/build"
 INSTALL_DIR="${BUILD_DIR}/install"
 OUTPUT_DIR="${ROOT_DIR}/output"
-# 其他常量保持不变
 RPM_SPEC="${ROOT_DIR}/rpm/os-transport.spec"
 PKG_NAME="os-transport"
 PKG_VERSION="1.0.0"
@@ -34,8 +33,8 @@ mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}" "${OUTPUT_DIR}"
 echo -e "${YELLOW}[3/6] 执行CMake配置...${NC}"
 cd "${BUILD_DIR}"
 cmake \
-    -DCMAKE_INSTALL_PREFIX=/usr \          # RPM安装后库的实际路径（/usr/lib64）
-    -DCMAKE_BUILD_TYPE=Release \           # 发布版本（优化）
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_C_FLAGS="-Wall -Wextra -O2 -fPIC" \
     ..
 
