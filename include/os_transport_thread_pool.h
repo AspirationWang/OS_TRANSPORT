@@ -29,9 +29,10 @@ typedef struct _ThreadPool* ThreadPoolHandle;
 /**
  * @brief 初始化线程池（1个asyncPoll + 64个worker，仅初始化不运行）
  * @param queue_cap 每个worker队列的容量
+ * @param pending_cap 全局pending队列初始容量（0=默认1024）
  * @return 线程池句柄/NULL
  */
-ThreadPoolHandle thread_pool_init(uint32_t queue_cap);
+ThreadPoolHandle thread_pool_init(uint32_t queue_cap, uint32_t pending_cap);
 
 /**
  * @brief 启动线程池（所有线程开始等待任务）
@@ -59,7 +60,7 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
  * @brief 通知asyncPoll线程（供其他事件调用）
  * @param handle 线程池句柄
  * @param notify_type 通知类型（自定义，如0=任务、1=其他事件）
- * @param data 通知附带数据
+ * @param data 通知附带数据（需自行管理内存）
  * @return 0=成功，-1=失败
  */
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
