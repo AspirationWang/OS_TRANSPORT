@@ -2,10 +2,9 @@
 #define OS_TRANSPORT_THREAD_POOL_INTERNAL_H
 
 #include "os_transport_thread_pool.h"
+#include "os_transport_internal.h"
 #include <pthread.h>
-#include <stdint.h>
-#include <stdbool.h>
-
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -18,41 +17,45 @@
 
 #endif // OS_TRANSPORT_INTERNAL_H
 
-// 任务队列结构体
+// Worker线程结构体（包含状态+队列）
 typedef struct {
-    ThreadPoolTask* tasks;
-    uint32_t cap;
-    uint32_t size;
-    uint32_t head;
-    uint32_t tail;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond_not_empty;  // 队列非空（线程等待任务）
-    pthread_cond_t cond_not_full;   // 队列非满（入队等待）
-    pthread_cond_t cond_task_done;  // 任务完成（asyncPoll等待）
-} TaskQueue;
+    pthread_t tid;                  // 线程ID
+    bool is_idle;                   // 是否空闲
+    bool is_running;                // 是否运行
+    ThreadPoolTask* task_queue;     // 任务队列
+    uint32_t queue_cap;             // 队列容量
+    uint32_t queue_size;            // 队列当前大小
+    pthread_mutex_t mutex;          // 队列/状态锁
+    pthread_cond_t cond_task;       // 任务通知条件变量
+} WorkerThread;
 
 // 线程池内部结构
 struct _ThreadPool {
     // 线程基础配置
-    pthread_t threads[THREAD_TYPE_MAX][64];  // 线程句柄（worker最多64）
-    uint32_t thread_nums[THREAD_TYPE_MAX];   // 固定：[1,1,64]
-    bool is_initialized;                     // 初始化完成标记
-    bool is_running;                         // 线程是否启动（false=阻塞）
-    bool is_destroying;                      // 销毁标记
+    pthread_t async_poll_tid;       // asyncPoll线程ID
+    WorkerThread workers[64];       // 64个worker线程
+    bool is_initialized;            // 初始化完成标记
+    bool is_running;                // 线程池是否启动
+    bool is_destroying;             // 销毁标记
 
-    // 队列：asyncPoll→notifier→worker
-    TaskQueue async_poll_queue;    // asyncPoll接收外部中断的队列
-    TaskQueue notifier_queue;      // notifier转发给worker的队列
-    TaskQueue worker_queue;        // worker执行的任务队列
+    // 任务&通知相关
+    atomic_uint64_t next_task_id;   // 下一个任务ID（原子类型）
+    pthread_mutex_t global_mutex;   // 全局锁
+    pthread_cond_t cond_interrupt;  // 外部中断条件（任务提交/其他通知）
+    pthread_cond_t cond_all_done;   // 所有任务完成条件
 
-    // 同步控制
-    pthread_mutex_t global_mutex;          // 全局锁
-    pthread_cond_t cond_thread_start;      // 线程启动信号（初始化后触发）
-    pthread_cond_t cond_interrupt;         // 外部中断信号（通知asyncPoll）
-    uint64_t next_task_id;                 // 下一个任务ID（自增）
+    // 通知缓存（其他事件通知asyncPoll）
+    uint32_t notify_type;           // 通知类型
+    void* notify_data;              // 通知数据
+    bool has_notify;                // 是否有未处理的通知
+
+    // 任务完成回调
+    TaskCompleteCallback complete_cb;
+    void* complete_user_data;
+
+    // 统计
+    atomic_uint32_t running_tasks;  // 运行中任务数
+    atomic_uint32_t completed_tasks;// 已完成任务数
 };
-
-// 内部函数：任务完成通知
-void notify_task_complete(ThreadPoolHandle handle, ThreadPoolTask* task, bool success);
 
 #endif // OS_TRANSPORT_THREAD_POOL_INTERNAL_H

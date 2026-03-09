@@ -5,52 +5,64 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-// 线程类型枚举
+// 线程类型枚举（仅保留两类）
 typedef enum {
     THREAD_TYPE_ASYNC_POLL = 0,  // 异步轮询线程（1个）
-    THREAD_TYPE_NOTIFIER = 1,    // 通知线程（1个）
-    THREAD_TYPE_WORKER = 2,      // 工作线程（64个）
-    THREAD_TYPE_MAX = 3
+    THREAD_TYPE_WORKER = 1,      // 工作线程（64个）
+    THREAD_TYPE_MAX = 2
 } ThreadType;
 
-// 任务完成回调（asyncPoll通知外部调用者）
-typedef void (*TaskCompleteCallback)(void* arg, bool success);
-
-// 任务结构体（扩展：包含完成回调+外部参数）
+// 任务结构体
 typedef struct {
-    ThreadType type;                  // 任务归属类型（最终由worker执行）
+    uint64_t task_id;                 // 唯一任务ID
     void (*task_func)(void* arg);     // 任务执行函数
     void* task_arg;                   // 任务参数
-    TaskCompleteCallback complete_cb; // 完成回调（asyncPoll调用）
-    void* complete_arg;               // 回调参数
     bool is_completed;                // 任务是否完成
-    uint64_t task_id;                 // 任务ID（唯一标识）
 } ThreadPoolTask;
 
-// 线程池句柄（对外隐藏）
+// 任务完成回调（asyncPoll通知外部）
+typedef void (*TaskCompleteCallback)(uint64_t task_id, bool success, void* user_data);
+
+// 线程池句柄（对外隐藏内部结构）
 typedef struct _ThreadPool* ThreadPoolHandle;
 
 /**
- * @brief 初始化线程池（固定创建1asyncPoll+1notifier+64worker，仅初始化不运行）
- * @param queue_cap 任务队列容量（建议设为1024）
+ * @brief 初始化线程池（1个asyncPoll + 64个worker，仅初始化不运行）
+ * @param queue_cap 每个worker队列的容量
  * @return 线程池句柄/NULL
  */
 ThreadPoolHandle thread_pool_init(uint32_t queue_cap);
 
 /**
- * @brief 外部触发中断：通知asyncPoll线程开始处理任务
- * @param handle 线程池句柄
- * @param task 要执行的任务（最终由worker处理）
- * @return 0=成功，-1=失败
- */
-int thread_pool_trigger_interrupt(ThreadPoolHandle handle, ThreadPoolTask* task);
-
-/**
- * @brief 启动所有线程（初始化后调用，线程开始等待任务）
+ * @brief 启动线程池（所有线程开始等待任务）
  * @param handle 线程池句柄
  * @return 0=成功，-1=失败
  */
 int thread_pool_start(ThreadPoolHandle handle);
+
+/**
+ * @brief 外部提交任务（触发中断，通知asyncPoll处理）
+ * @param handle 线程池句柄
+ * @param task_func 任务执行函数
+ * @param task_arg 任务参数
+ * @param complete_cb 任务完成回调
+ * @param user_data 回调用户数据
+ * @return 任务ID（失败返回0）
+ */
+uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
+                                 void (*task_func)(void* arg),
+                                 void* task_arg,
+                                 TaskCompleteCallback complete_cb,
+                                 void* user_data);
+
+/**
+ * @brief 通知asyncPoll线程（供其他事件调用）
+ * @param handle 线程池句柄
+ * @param notify_type 通知类型（自定义，如0=任务、1=其他事件）
+ * @param data 通知附带数据
+ * @return 0=成功，-1=失败
+ */
+int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
 
 /**
  * @brief 销毁线程池（等待所有任务完成后退出）
