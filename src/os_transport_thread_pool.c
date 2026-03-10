@@ -150,14 +150,16 @@ static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue) {
     pthread_mutex_lock(&queue->mutex);
     while (queue->size == 0 && !queue->is_destroying) {
         // 等待条件变量（释放锁，被唤醒后重新加锁）
+        LOG_INFO("[WZY] Enter into function pending_queue_pop:queue->size == 0 && !queue->is_destroying");
         int ret = pthread_cond_wait(&queue->cond_has_task, &queue->mutex);
+        LOG_INFO("[WZY] Enter into function pending_queue_pop:queue->size == 0 && !queue->is_destroying end!");
         if (ret != 0) {
             LOG_ERROR("pthread_cond_wait failed (err=%d)", ret);
             pthread_mutex_unlock(&queue->mutex);
             return NULL;
         }
     }
-
+    LOG_INFO("[WZY] Enter into function pending_queue_pop: break1");
     // 场景1：队列已销毁，直接返回NULL
     if (queue->is_destroying) {
         pthread_mutex_unlock(&queue->mutex);
@@ -166,6 +168,7 @@ static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue) {
     }
 
     // 场景2：有任务，正常出队
+    LOG_INFO("[WZY] Enter into function pending_queue_pop: break2");
     ThreadPoolTask* task = queue->tasks[queue->head];
     queue->head = (queue->head + 1) % queue->cap;
     queue->size--;
