@@ -21,11 +21,11 @@
 /**
  * @brief Worker队列入队
  */
-static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {
+static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {LOG_INFOLOG_INFO
     if (worker == NULL || task == NULL || worker->queue_size >= worker->queue_cap) {
         return -1;
     }
-
+    LOG_INFO("[WZY] Enter into function worker_queue_push");
     worker->task_queue[worker->queue_tail] = *task;
     worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
     worker->queue_size++;
@@ -36,6 +36,7 @@ static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {
  * @brief Worker队列出队
  */
 static int worker_queue_pop(WorkerThread* worker, ThreadPoolTask* task) {
+    LOG_INFO("[WZY] Enter into function worker_queue_pop");
     if (worker == NULL || task == NULL || worker->queue_size == 0) {
         return -1;
     }
@@ -50,10 +51,8 @@ static int worker_queue_pop(WorkerThread* worker, ThreadPoolTask* task) {
 /**
  * @brief 初始化Pending队列
  */
-/**
- * @brief 初始化Pending队列
- */
 static int pending_queue_init(PendingTaskQueue* queue, uint32_t init_cap) {
+    LOG_INFO("[WZY] Enter into function pending_queue_init");
     if (queue == NULL) return -1;
 
     // 默认初始容量1024
@@ -81,6 +80,7 @@ static int pending_queue_init(PendingTaskQueue* queue, uint32_t init_cap) {
  * @brief Pending队列动态扩容（翻倍）
  */
 static int pending_queue_resize(PendingTaskQueue* queue) {
+    LOG_INFO("[WZY] Enter into function pending_queue_resize");
     if (queue == NULL) return -1;
 
     uint32_t new_cap = queue->cap * 2;
@@ -111,6 +111,7 @@ static int pending_queue_resize(PendingTaskQueue* queue) {
  * @brief Pending队列入队（缓存任务）
  */
 static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task) {
+    LOG_INFO("[WZY] Enter into function pending_queue_push");
     if (queue == NULL || task == NULL) return -1;
 
     pthread_mutex_lock(&queue->mutex);
@@ -143,6 +144,7 @@ static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task) {
  * @brief Pending队列出队
  */
 static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue) {
+    LOG_INFO("[WZY] Enter into function pending_queue_pop");
     if (queue == NULL) return NULL;
 
     pthread_mutex_lock(&queue->mutex);
@@ -176,10 +178,8 @@ static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue) {
 /**
  * @brief 销毁Pending队列
  */
-/**
- * @brief 销毁Pending队列
- */
 static void pending_queue_destroy(PendingTaskQueue* queue) {
+    LOG_INFO("[WZY] Enter into function pending_queue_destroy");
     if (queue == NULL) return;
 
     // 第一步：标记销毁，唤醒所有等待的线程
@@ -207,6 +207,7 @@ static void pending_queue_destroy(PendingTaskQueue* queue) {
  * @brief 查找最优Worker（优先空闲→最少任务）
  */
 static int find_best_worker(struct _ThreadPool* pool) {
+    LOG_INFO("[WZY] Enter into function find_best_worker");
     int target_idx = -1;
     uint32_t min_task_count = UINT32_MAX;
 
@@ -241,6 +242,7 @@ static int find_best_worker(struct _ThreadPool* pool) {
 
 // ===================== Worker线程逻辑 =====================
 static void* worker_thread_func(void* arg) {
+    LOG_INFO("[WZY] Enter into function worker_thread_func");
     WorkerThreadArg* worker_arg = (WorkerThreadArg*)arg;
     struct _ThreadPool* pool = worker_arg->pool;
     int worker_idx = worker_arg->worker_idx;
@@ -349,14 +351,14 @@ static void* worker_thread_func(void* arg) {
 
 // ===================== AsyncPoll线程逻辑（调度中枢） =====================
 static void* async_poll_thread_func(void* arg) {
-    LOG_INFO("[WZY]Enter into function async_poll_thread_func");
+    LOG_INFO("[WZY] Enter into function async_poll_thread_func");
     struct _ThreadPool* pool = (struct _ThreadPool*)arg;
     LOG_INFO("asyncPoll thread initialized, waiting for start");
 
     // 等待线程池启动（阻塞）
     pthread_mutex_lock(&pool->global_mutex);
     while (!pool->is_running && !pool->is_destroying) {
-        LOG_INFO("[WZY]pool is not running or destroyin");
+        LOG_INFO("[WZY] pool is not running or destroying");
         pthread_cond_wait(&pool->cond_interrupt, &pool->global_mutex);
     }
     pthread_mutex_unlock(&pool->global_mutex);
@@ -371,15 +373,16 @@ static void* async_poll_thread_func(void* arg) {
     LOG_INFO("asyncPoll thread started, monitoring interrupt");
 
     while (!pool->is_destroying) {
-        LOG_INFO("[WZY]asyncPoll is working");
+        LOG_INFO("[WZY] asyncPoll is working");
         // 第一步：优先处理pending队列（缓存的任务）
         while (1) {
-            LOG_INFO("[WZY]asyncPoll is work for pending queue");
+            LOG_INFO("[WZY] asyncPoll is work for pending queue");
             ThreadPoolTask* pending_task = pending_queue_pop(&pool->pending_queue);
             if (pending_task == NULL) {
-                LOG_INFO("[WZY]pending_task is null");
+                LOG_INFO("[WZY] pending_task is null");
+                break;
             } else {
-                LOG_INFO("[WZY]pending_task is not null");
+                LOG_INFO("[WZY] pending_task is not null");
             }
 
             // 查找最优worker
@@ -499,6 +502,7 @@ static void* async_poll_thread_func(void* arg) {
  * @brief 初始化线程池
  */
 ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
+    LOG_INFO("[WZY] Enter into function thread_pool_init");
     // 参数校验
     if (worker_queue_cap == 0) {
         LOG_ERROR("worker queue cap cannot be 0");
@@ -591,6 +595,7 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
  * @brief 启动线程池
  */
 int thread_pool_start(ThreadPoolHandle handle) {
+    LOG_INFO("[WZY] Enter into function thread_pool_start");
     if (handle == NULL || !handle->is_initialized || handle->is_running) {
         LOG_ERROR("invalid thread pool state (initialized=%d, running=%d)",
                  handle->is_initialized, handle->is_running);
@@ -616,6 +621,7 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                  TaskCompleteCb complete_cb,
                                  void* user_data) {
     // 参数校验
+    LOG_INFO("[WZY] Enter into function thread_pool_submit_task");
     if (handle == NULL || !handle->is_initialized || handle->is_destroying || task_func == NULL) {
         LOG_ERROR("invalid param (handle=%p, initialized=%d, destroying=%d, task_func=%p)",
                  handle, handle->is_initialized, handle->is_destroying, task_func);
@@ -658,6 +664,7 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
  * @brief 通用通知asyncPoll接口
  */
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data) {
+    LOG_INFO("[WZY] Enter into function async_poll_notify");
     if (handle == NULL || !handle->is_initialized || handle->is_destroying) {
         LOG_ERROR("invalid param (handle=%p, initialized=%d, destroying=%d)",
                  handle, handle->is_initialized, handle->is_destroying);
@@ -680,6 +687,7 @@ int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data)
  * @brief 销毁线程池
  */
 void thread_pool_destroy(ThreadPoolHandle handle) {
+    LOG_INFO("[WZY] Enter into function thread_pool_destroy");
     if (handle == NULL) return;
 
     LOG_INFO("thread pool destroying...");
