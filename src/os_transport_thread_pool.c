@@ -20,7 +20,7 @@
 /**
  * @brief Worker队列入队
  */
-static int worker_queue_push(OSWorkerThread* worker, const OSThreadPoolTask* task) {
+static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {
     if (worker == NULL || task == NULL || worker->queue_size >= worker->queue_cap) {
         return -1;
     }
@@ -34,7 +34,7 @@ static int worker_queue_push(OSWorkerThread* worker, const OSThreadPoolTask* tas
 /**
  * @brief Worker队列出队
  */
-static int worker_queue_pop(OSWorkerThread* worker, OSThreadPoolTask* task) {
+static int worker_queue_pop(WorkerThread* worker, ThreadPoolTask* task) {
     if (worker == NULL || task == NULL || worker->queue_size == 0) {
         return -1;
     }
@@ -49,7 +49,7 @@ static int worker_queue_pop(OSWorkerThread* worker, OSThreadPoolTask* task) {
 /**
  * @brief 初始化Pending队列
  */
-static int pending_queue_init(OSPendingTaskQueue* queue, uint32_t init_cap) {
+static int pending_queue_init(PendingTaskQueue* queue, uint32_t init_cap) {
     if (queue == NULL) return -1;
 
     // 默认初始容量1024
@@ -57,7 +57,7 @@ static int pending_queue_init(OSPendingTaskQueue* queue, uint32_t init_cap) {
         init_cap = 1024;
     }
 
-    queue->tasks = (OSThreadPoolTask**)calloc(init_cap, sizeof(OSThreadPoolTask*));
+    queue->tasks = (ThreadPoolTask**)calloc(init_cap, sizeof(ThreadPoolTask*));
     if (queue->tasks == NULL) {
         LOG_ERROR("pending queue malloc failed");
         return -1;
@@ -75,11 +75,11 @@ static int pending_queue_init(OSPendingTaskQueue* queue, uint32_t init_cap) {
 /**
  * @brief Pending队列动态扩容（翻倍）
  */
-static int pending_queue_resize(OSPendingTaskQueue* queue) {
+static int pending_queue_resize(PendingTaskQueue* queue) {
     if (queue == NULL) return -1;
 
     uint32_t new_cap = queue->cap * 2;
-    OSThreadPoolTask** new_tasks = (OSThreadPoolTask**)calloc(new_cap, sizeof(OSThreadPoolTask*));
+    ThreadPoolTask** new_tasks = (ThreadPoolTask**)calloc(new_cap, sizeof(ThreadPoolTask*));
     if (new_tasks == NULL) {
         LOG_ERROR("pending queue resize malloc failed (new cap=%d)", new_cap);
         return -1;
@@ -105,7 +105,7 @@ static int pending_queue_resize(OSPendingTaskQueue* queue) {
 /**
  * @brief Pending队列入队（缓存任务）
  */
-static int pending_queue_push(OSPendingTaskQueue* queue, OSThreadPoolTask* task) {
+static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task) {
     if (queue == NULL || task == NULL) return -1;
 
     pthread_mutex_lock(&queue->mutex);
@@ -137,7 +137,7 @@ static int pending_queue_push(OSPendingTaskQueue* queue, OSThreadPoolTask* task)
 /**
  * @brief Pending队列出队
  */
-static OSThreadPoolTask* pending_queue_pop(OSPendingTaskQueue* queue) {
+static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue) {
     if (queue == NULL) return NULL;
 
     pthread_mutex_lock(&queue->mutex);
@@ -153,7 +153,7 @@ static OSThreadPoolTask* pending_queue_pop(OSPendingTaskQueue* queue) {
     }
 
     // 出队
-    OSThreadPoolTask* task = queue->tasks[queue->head];
+    ThreadPoolTask* task = queue->tasks[queue->head];
     queue->head = (queue->head + 1) % queue->cap;
     queue->size--;
 
@@ -164,7 +164,7 @@ static OSThreadPoolTask* pending_queue_pop(OSPendingTaskQueue* queue) {
 /**
  * @brief 销毁Pending队列
  */
-static void pending_queue_destroy(OSPendingTaskQueue* queue) {
+static void pending_queue_destroy(PendingTaskQueue* queue) {
     if (queue == NULL) return;
 
     pthread_mutex_lock(&queue->mutex);
@@ -186,12 +186,12 @@ static void pending_queue_destroy(OSPendingTaskQueue* queue) {
 /**
  * @brief 查找最优Worker（优先空闲→最少任务）
  */
-static int find_best_worker(struct _OSThreadPool* pool) {
+static int find_best_worker(struct _ThreadPool* pool) {
     int target_idx = -1;
     uint32_t min_task_count = UINT32_MAX;
 
     for (int i = 0; i < 64; i++) {
-        OSWorkerThread* worker = &pool->workers[i];
+        WorkerThread* worker = &pool->workers[i];
         pthread_mutex_lock(&worker->mutex);
 
         // 跳过已销毁/未运行的worker
@@ -221,12 +221,12 @@ static int find_best_worker(struct _OSThreadPool* pool) {
 
 // ===================== Worker线程逻辑 =====================
 static void* worker_thread_func(void* arg) {
-    OSWorkerThreadArg* worker_arg = (OSWorkerThreadArg*)arg;
-    struct _OSThreadPool* pool = worker_arg->pool;
+    WorkerThreadArg* worker_arg = (WorkerThreadArg*)arg;
+    struct _ThreadPool* pool = worker_arg->pool;
     int worker_idx = worker_arg->worker_idx;
     free(worker_arg); // 释放参数内存
 
-    OSWorkerThread* worker = &pool->workers[worker_idx];
+    WorkerThread* worker = &pool->workers[worker_idx];
     LOG_INFO("worker %d initialized, waiting for start", worker_idx);
 
     // 等待线程池启动（阻塞）
@@ -251,7 +251,7 @@ static void* worker_thread_func(void* arg) {
 
     LOG_INFO("worker %d started, waiting for task", worker_idx);
 
-    OSThreadPoolTask task;
+    ThreadPoolTask task;
     while (!pool->is_destroying) {
         // 等待任务通知（自动释放锁，被唤醒后重新加锁）
         pthread_mutex_lock(&worker->mutex);
@@ -329,7 +329,7 @@ static void* worker_thread_func(void* arg) {
 
 // ===================== AsyncPoll线程逻辑（调度中枢） =====================
 static void* async_poll_thread_func(void* arg) {
-    struct _OSThreadPool* pool = (struct _OSThreadPool*)arg;
+    struct _ThreadPool* pool = (struct _ThreadPool*)arg;
     LOG_INFO("asyncPoll thread initialized, waiting for start");
 
     // 等待线程池启动（阻塞）
@@ -351,7 +351,7 @@ static void* async_poll_thread_func(void* arg) {
     while (!pool->is_destroying) {
         // 第一步：优先处理pending队列（缓存的任务）
         while (1) {
-            OSThreadPoolTask* pending_task = pending_queue_pop(&pool->pending_queue);
+            ThreadPoolTask* pending_task = pending_queue_pop(&pool->pending_queue);
             if (pending_task == NULL) break;
 
             // 查找最优worker
@@ -363,7 +363,7 @@ static void* async_poll_thread_func(void* arg) {
             }
 
             // 尝试将pending任务放入worker队列
-            OSWorkerThread* worker = &pool->workers[target_idx];
+            WorkerThread* worker = &pool->workers[target_idx];
             pthread_mutex_lock(&worker->mutex);
             int ret = worker_queue_push(worker, pending_task);
             pthread_mutex_unlock(&worker->mutex);
@@ -402,7 +402,7 @@ static void* async_poll_thread_func(void* arg) {
 
         // 处理任务提交通知（类型0）
         if (notify_type == 0) {
-            OSThreadPoolTask* task = (OSThreadPoolTask*)notify_data;
+            ThreadPoolTask* task = (ThreadPoolTask*)notify_data;
             if (task == NULL) {
                 LOG_ERROR("asyncPoll receive null task");
                 continue;
@@ -417,7 +417,7 @@ static void* async_poll_thread_func(void* arg) {
             }
 
             // 尝试放入worker队列
-            OSWorkerThread* worker = &pool->workers[target_idx];
+            WorkerThread* worker = &pool->workers[target_idx];
             pthread_mutex_lock(&worker->mutex);
             int ret = worker_queue_push(worker, task);
             pthread_mutex_unlock(&worker->mutex);
@@ -445,7 +445,7 @@ static void* async_poll_thread_func(void* arg) {
     pthread_mutex_lock(&pool->pending_queue.mutex);
     for (uint32_t i = 0; i < pool->pending_queue.size; i++) {
         uint32_t idx = (pool->pending_queue.head + i) % pool->pending_queue.cap;
-        OSThreadPoolTask* task = pool->pending_queue.tasks[idx];
+        ThreadPoolTask* task = pool->pending_queue.tasks[idx];
         if (pool->complete_cb != NULL) {
             pool->complete_cb(task->task_id, false, pool->cb_user_data);
         }
@@ -462,7 +462,7 @@ static void* async_poll_thread_func(void* arg) {
 /**
  * @brief 初始化线程池
  */
-OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
+ThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
     // 参数校验
     if (worker_queue_cap == 0) {
         LOG_ERROR("worker queue cap cannot be 0");
@@ -470,7 +470,7 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
     }
 
     // 分配线程池内存
-    struct _OSThreadPool* pool = (struct _OSThreadPool*)calloc(1, sizeof(struct _OSThreadPool));
+    struct _ThreadPool* pool = (struct _ThreadPool*)calloc(1, sizeof(struct _ThreadPool));
     if (pool == NULL) {
         LOG_ERROR("thread pool malloc failed");
         return NULL;
@@ -493,18 +493,18 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
     // 初始化pending队列
     if (pending_queue_init(&pool->pending_queue, pending_queue_cap) != 0) {
         LOG_ERROR("pending queue init failed");
-        os_thread_pool_destroy(pool);
+        thread_pool_destroy(pool);
         return NULL;
     }
 
     // 初始化64个worker线程
     for (int i = 0; i < 64; i++) {
-        OSWorkerThread* worker = &pool->workers[i];
+        WorkerThread* worker = &pool->workers[i];
         worker->queue_cap = worker_queue_cap;
-        worker->task_queue = (OSThreadPoolTask*)calloc(worker_queue_cap, sizeof(OSThreadPoolTask));
+        worker->task_queue = (ThreadPoolTask*)calloc(worker_queue_cap, sizeof(ThreadPoolTask));
         if (worker->task_queue == NULL) {
             LOG_ERROR("worker %d queue malloc failed", i);
-            os_thread_pool_destroy(pool);
+            thread_pool_destroy(pool);
             return NULL;
         }
 
@@ -518,7 +518,7 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
         worker->queue_size = 0;
 
         // 创建worker线程参数
-        OSWorkerThreadArg* worker_arg = (OSWorkerThreadArg*)malloc(sizeof(OSWorkerThreadArg));
+        WorkerThreadArg* worker_arg = (WorkerThreadArg*)malloc(sizeof(WorkerThreadArg));
         worker_arg->pool = pool;
         worker_arg->worker_idx = i;
 
@@ -526,7 +526,7 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
         if (pthread_create(&worker->tid, NULL, worker_thread_func, worker_arg) != 0) {
             LOG_ERROR("create worker %d failed (err=%d)", i, errno);
             free(worker_arg);
-            os_thread_pool_destroy(pool);
+            thread_pool_destroy(pool);
             return NULL;
         }
     }
@@ -534,7 +534,7 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
     // 创建asyncPoll线程（初始化但不运行）
     if (pthread_create(&pool->async_poll_tid, NULL, async_poll_thread_func, pool) != 0) {
         LOG_ERROR("create asyncPoll thread failed (err=%d)", errno);
-        os_thread_pool_destroy(pool);
+        thread_pool_destroy(pool);
         return NULL;
     }
 
@@ -548,13 +548,13 @@ OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pendi
 
     LOG_INFO("thread pool init success: 1asyncPoll + 64workers (worker cap=%d, pending cap=%d)",
              worker_queue_cap, pool->pending_queue.cap);
-    return (OSThreadPoolHandle)pool;
+    return (ThreadPoolHandle)pool;
 }
 
 /**
  * @brief 启动线程池
  */
-int os_thread_pool_start(OSThreadPoolHandle handle) {
+int thread_pool_start(ThreadPoolHandle handle) {
     if (handle == NULL || !handle->is_initialized || handle->is_running) {
         LOG_ERROR("invalid thread pool state (initialized=%d, running=%d)",
                  handle->is_initialized, handle->is_running);
@@ -574,10 +574,10 @@ int os_thread_pool_start(OSThreadPoolHandle handle) {
 /**
  * @brief 外部提交任务
  */
-uint64_t os_thread_pool_submit_task(OSThreadPoolHandle handle,
+uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                     void (*task_func)(void* arg),
                                     void* task_arg,
-                                    OSTaskCompleteCb complete_cb,
+                                    TaskCompleteCb complete_cb,
                                     void* user_data) {
     // 参数校验
     if (handle == NULL || !handle->is_initialized || handle->is_destroying || task_func == NULL) {
@@ -592,7 +592,7 @@ uint64_t os_thread_pool_submit_task(OSThreadPoolHandle handle,
     pthread_mutex_unlock(&handle->task_id_mutex);
 
     // 构造任务（堆分配，避免栈内存失效）
-    OSThreadPoolTask* task = (OSThreadPoolTask*)malloc(sizeof(OSThreadPoolTask));
+    ThreadPoolTask* task = (ThreadPoolTask*)malloc(sizeof(ThreadPoolTask));
     if (task == NULL) {
         LOG_ERROR("task %lu malloc failed", task_id);
         return 0;
@@ -621,7 +621,7 @@ uint64_t os_thread_pool_submit_task(OSThreadPoolHandle handle,
 /**
  * @brief 通用通知asyncPoll接口
  */
-int os_async_poll_notify(OSThreadPoolHandle handle, uint32_t notify_type, void* data) {
+int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data) {
     if (handle == NULL || !handle->is_initialized || handle->is_destroying) {
         LOG_ERROR("invalid param (handle=%p, initialized=%d, destroying=%d)",
                  handle, handle->is_initialized, handle->is_destroying);
@@ -643,7 +643,7 @@ int os_async_poll_notify(OSThreadPoolHandle handle, uint32_t notify_type, void* 
 /**
  * @brief 销毁线程池
  */
-void os_thread_pool_destroy(OSThreadPoolHandle handle) {
+void thread_pool_destroy(ThreadPoolHandle handle) {
     if (handle == NULL) return;
 
     LOG_INFO("thread pool destroying...");
@@ -662,7 +662,7 @@ void os_thread_pool_destroy(OSThreadPoolHandle handle) {
 
     // 等待64个worker线程退出并清理
     for (int i = 0; i < 64; i++) {
-        OSWorkerThread* worker = &handle->workers[i];
+        WorkerThread* worker = &handle->workers[i];
         pthread_cond_broadcast(&worker->cond_task); // 唤醒阻塞的worker
         pthread_join(worker->tid, NULL);
 

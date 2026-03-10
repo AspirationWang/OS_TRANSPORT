@@ -24,23 +24,23 @@ void test_complete_cb(uint64_t task_id, bool success, void* user_data) {
 /**
  * @brief 自定义事件通知示例
  */
-void test_custom_notify(OSThreadPoolHandle pool) {
+void test_custom_notify(ThreadPoolHandle pool) {
     char* custom_data = "system: resource check completed";
-    os_async_poll_notify(pool, 1, custom_data); // 类型1：自定义事件
+    async_poll_notify(pool, 1, custom_data); // 类型1：自定义事件
 }
 
 int main() {
     // 1. 初始化线程池（每个worker队列容量2，pending队列初始容量10）
-    OSThreadPoolHandle pool = os_thread_pool_init(2, 10);
+    ThreadPoolHandle pool = os_thread_pool_init(2, 10);
     if (pool == NULL) {
         printf("thread pool init failed\n");
         return -1;
     }
 
     // 2. 启动线程池
-    if (os_thread_pool_start(pool) != 0) {
+    if (thread_pool_start(pool) != 0) {
         printf("thread pool start failed\n");
-        os_thread_pool_destroy(pool);
+        thread_pool_destroy(pool);
         return -1;
     }
 
@@ -49,7 +49,7 @@ int main() {
     for (int i = 0; i < task_count; i++) {
         int* task_arg = (int*)malloc(sizeof(int));
         *task_arg = i + 1;
-        uint64_t task_id = os_thread_pool_submit_task(pool,
+        uint64_t task_id = thread_pool_submit_task(pool,
                                                       test_task_func,
                                                       task_arg,
                                                       test_complete_cb,
@@ -72,6 +72,6 @@ int main() {
     sleep(30); // 根据任务数调整等待时间
 
     // 6. 销毁线程池
-    os_thread_pool_destroy(pool);
+    thread_pool_destroy(pool);
     return 0;
 }

@@ -10,9 +10,9 @@
  * @brief Worker线程参数（传递pool和索引）
  */
 typedef struct {
-    struct _OSThreadPool* pool;
+    struct _ThreadPool* pool;
     int worker_idx;
-} OSWorkerThreadArg;
+} WorkerThreadArg;
 
 /**
  * @brief Worker线程结构体
@@ -21,35 +21,35 @@ typedef struct {
     pthread_t tid;                  // 线程ID
     bool is_idle;                   // 是否空闲（无任务运行）
     bool is_running;                // 是否处于运行状态
-    OSThreadPoolTask* task_queue;   // 环形任务队列
+    ThreadPoolTask* task_queue;   // 环形任务队列
     uint32_t queue_cap;             // 队列容量
     uint32_t queue_head;            // 队列头指针
     uint32_t queue_tail;            // 队列尾指针
     uint32_t queue_size;            // 当前任务数
     pthread_mutex_t mutex;          // 队列/状态锁
     pthread_cond_t cond_task;       // 任务通知条件变量
-} OSWorkerThread;
+} WorkerThread;
 
 /**
  * @brief 全局Pending队列（缓存队列满的任务）
  */
 typedef struct {
-    OSThreadPoolTask** tasks;       // 任务指针数组
+    ThreadPoolTask** tasks;       // 任务指针数组
     uint32_t cap;                   // 队列容量
     uint32_t size;                  // 当前任务数
     uint32_t head;                  // 头指针
     uint32_t tail;                  // 尾指针
     pthread_mutex_t mutex;          // 队列锁
     pthread_cond_t cond_has_task;   // 有任务通知条件
-} OSPendingTaskQueue;
+} PendingTaskQueue;
 
 /**
  * @brief 线程池内部结构
  */
-struct _OSThreadPool {
+struct _ThreadPool {
     // 线程基础配置
     pthread_t async_poll_tid;       // asyncPoll线程ID
-    OSWorkerThread workers[64];     // 64个worker线程
+    WorkerThread workers[64];     // 64个worker线程
     bool is_initialized;            // 初始化完成标记
     bool is_running;                // 线程池是否启动
     bool is_destroying;             // 销毁标记
@@ -69,7 +69,7 @@ struct _OSThreadPool {
     bool has_notify;                // 是否有未处理通知
 
     // 任务回调
-    OSTaskCompleteCb complete_cb;   // 任务完成回调
+    TaskCompleteCb complete_cb;   // 任务完成回调
     void* cb_user_data;             // 回调透传数据
 
     // 任务统计（互斥锁保护）
@@ -78,7 +78,7 @@ struct _OSThreadPool {
     pthread_mutex_t stats_mutex;    // 统计锁
 
     // 全局Pending队列
-    OSPendingTaskQueue pending_queue;
+    PendingTaskQueue pending_queue;
 };
 
 #endif // OS_THREAD_POOL_INTERNAL_H
