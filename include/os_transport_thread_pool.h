@@ -2,60 +2,74 @@
 #define OS_TRANSPORT_THREAD_POOL_H
 
 #include <stdint.h>
-#include <stdlib.h>
 #include <stdbool.h>
 
-// 线程类型枚举
-typedef enum {
-    THREAD_TYPE_ASYNC_POLL = 0,  // 异步轮询线程（1个）
-    THREAD_TYPE_NOTIFIER = 1,    // 通知线程（1个）
-    THREAD_TYPE_WORKER = 2,      // 工作线程（64个）
-    THREAD_TYPE_MAX = 3
-} ThreadType;
-
-// 任务完成回调（asyncPoll通知外部调用者）
-typedef void (*TaskCompleteCallback)(void* arg, bool success);
-
-// 任务结构体（扩展：包含完成回调+外部参数）
+/**
+ * @brief 任务结构体
+ */
 typedef struct {
-    ThreadType type;                  // 任务归属类型（最终由worker执行）
+    uint64_t task_id;                 // 唯一任务ID
     void (*task_func)(void* arg);     // 任务执行函数
     void* task_arg;                   // 任务参数
-    TaskCompleteCallback complete_cb; // 完成回调（asyncPoll调用）
-    void* complete_arg;               // 回调参数
-    bool is_completed;                // 任务是否完成
-    uint64_t task_id;                 // 任务ID（唯一标识）
-} ThreadPoolTask;
-
-// 线程池句柄（对外隐藏）
-typedef struct _ThreadPool* ThreadPoolHandle;
+    bool is_completed;                // 任务完成标记
+} OSThreadPoolTask;
 
 /**
- * @brief 初始化线程池（固定创建1asyncPoll+1notifier+64worker，仅初始化不运行）
- * @param queue_cap 任务队列容量（建议设为1024）
- * @return 线程池句柄/NULL
+ * @brief 任务完成回调函数（通知外部任务结果）
+ * @param task_id 任务ID
+ * @param success 任务是否执行成功
+ * @param user_data 外部透传数据
  */
-ThreadPoolHandle thread_pool_init(uint32_t queue_cap);
+typedef void (*OSTaskCompleteCb)(uint64_t task_id, bool success, void* user_data);
 
 /**
- * @brief 外部触发中断：通知asyncPoll线程开始处理任务
+ * @brief 线程池句柄（对外隐藏内部结构）
+ */
+typedef struct _OSThreadPool* OSThreadPoolHandle;
+
+/**
+ * @brief 初始化线程池（1个asyncPoll + 64个worker，仅初始化不运行）
+ * @param worker_queue_cap 每个worker队列容量
+ * @param pending_queue_cap 全局pending队列初始容量（0=默认1024）
+ * @return 线程池句柄（NULL=失败）
+ */
+OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap);
+
+/**
+ * @brief 启动线程池（所有线程开始等待任务）
  * @param handle 线程池句柄
- * @param task 要执行的任务（最终由worker处理）
  * @return 0=成功，-1=失败
  */
-int thread_pool_trigger_interrupt(ThreadPoolHandle handle, ThreadPoolTask* task);
+int os_thread_pool_start(OSThreadPoolHandle handle);
 
 /**
- * @brief 启动所有线程（初始化后调用，线程开始等待任务）
+ * @brief 外部提交任务（触发中断，通知asyncPoll处理）
  * @param handle 线程池句柄
+ * @param task_func 任务执行函数
+ * @param task_arg 任务参数（需用户自行管理内存）
+ * @param complete_cb 任务完成回调
+ * @param user_data 回调透传数据
+ * @return 任务ID（0=失败）
+ */
+uint64_t os_thread_pool_submit_task(OSThreadPoolHandle handle,
+                                    void (*task_func)(void* arg),
+                                    void* task_arg,
+                                    OSTaskCompleteCb complete_cb,
+                                    void* user_data);
+
+/**
+ * @brief 通知asyncPoll线程（通用接口，支持自定义事件）
+ * @param handle 线程池句柄
+ * @param notify_type 通知类型（0=任务提交，1+自定义）
+ * @param data 通知附带数据（需用户自行管理内存）
  * @return 0=成功，-1=失败
  */
-int thread_pool_start(ThreadPoolHandle handle);
+int os_async_poll_notify(OSThreadPoolHandle handle, uint32_t notify_type, void* data);
 
 /**
- * @brief 销毁线程池（等待所有任务完成后退出）
+ * @brief 销毁线程池（等待所有任务完成后释放资源）
  * @param handle 线程池句柄
  */
-void thread_pool_destroy(ThreadPoolHandle handle);
+void os_thread_pool_destroy(OSThreadPoolHandle handle);
 
-#endif // OS_TRANSPORT_THREAD_POOL_H
+#endif // OS_THREAD_POOL_H

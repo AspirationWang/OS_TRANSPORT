@@ -2,438 +2,689 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
-#include <pthread.h>
+#include <stdio.h>
 
-// 初始化单个任务队列
-static int task_queue_init(TaskQueue* queue, uint32_t cap) {
-    if (queue == NULL || cap == 0) {
+// ===================== 日志宏（简化版） =====================
+#ifndef OS_LOG
+#define OS_LOG(level, fmt, ...) \
+    do { \
+        printf("[%s][%s:%d] " fmt "\n", level, __FILE__, __LINE__, ##__VA_ARGS__); \
+    } while (0)
+#endif
+
+#define LOG_INFO(fmt, ...)  OS_LOG("INFO", fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  OS_LOG("WARN", fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) OS_LOG("ERROR", fmt, ##__VA_ARGS__)
+
+// ===================== Worker队列操作 =====================
+/**
+ * @brief Worker队列入队
+ */
+static int worker_queue_push(OSWorkerThread* worker, const OSThreadPoolTask* task) {
+    if (worker == NULL || task == NULL || worker->queue_size >= worker->queue_cap) {
         return -1;
     }
 
-    queue->tasks = (ThreadPoolTask*)calloc(cap, sizeof(ThreadPoolTask));
+    worker->task_queue[worker->queue_tail] = *task;
+    worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
+    worker->queue_size++;
+    return 0;
+}
+
+/**
+ * @brief Worker队列出队
+ */
+static int worker_queue_pop(OSWorkerThread* worker, OSThreadPoolTask* task) {
+    if (worker == NULL || task == NULL || worker->queue_size == 0) {
+        return -1;
+    }
+
+    *task = worker->task_queue[worker->queue_head];
+    worker->queue_head = (worker->queue_head + 1) % worker->queue_cap;
+    worker->queue_size--;
+    return 0;
+}
+
+// ===================== Pending队列操作（核心缓存） =====================
+/**
+ * @brief 初始化Pending队列
+ */
+static int pending_queue_init(OSPendingTaskQueue* queue, uint32_t init_cap) {
+    if (queue == NULL) return -1;
+
+    // 默认初始容量1024
+    if (init_cap == 0) {
+        init_cap = 1024;
+    }
+
+    queue->tasks = (OSThreadPoolTask**)calloc(init_cap, sizeof(OSThreadPoolTask*));
     if (queue->tasks == NULL) {
-        TRANSPORT_LOG("ERROR", "malloc task queue failed, cap=%d", cap);
+        LOG_ERROR("pending queue malloc failed");
         return -1;
     }
 
-    queue->cap = cap;
+    queue->cap = init_cap;
     queue->size = 0;
     queue->head = 0;
     queue->tail = 0;
-
-    // 初始化同步原语
-    if (pthread_mutex_init(&queue->mutex, NULL) != 0 ||
-        pthread_cond_init(&queue->cond_not_empty, NULL) != 0 ||
-        pthread_cond_init(&queue->cond_not_full, NULL) != 0 ||
-        pthread_cond_init(&queue->cond_task_done, NULL) != 0) {
-        TRANSPORT_LOG("ERROR", "init mutex/cond failed, errno=%d", errno);
-        free(queue->tasks);
-        return -1;
-    }
-
+    pthread_mutex_init(&queue->mutex, NULL);
+    pthread_cond_init(&queue->cond_has_task, NULL);
     return 0;
 }
 
-// 销毁任务队列
-static void task_queue_destroy(TaskQueue* queue) {
-    if (queue == NULL) return;
+/**
+ * @brief Pending队列动态扩容（翻倍）
+ */
+static int pending_queue_resize(OSPendingTaskQueue* queue) {
+    if (queue == NULL) return -1;
 
-    pthread_mutex_lock(&queue->mutex);
-    if (queue->tasks != NULL) {
-        free(queue->tasks);
-        queue->tasks = NULL;
+    uint32_t new_cap = queue->cap * 2;
+    OSThreadPoolTask** new_tasks = (OSThreadPoolTask**)calloc(new_cap, sizeof(OSThreadPoolTask*));
+    if (new_tasks == NULL) {
+        LOG_ERROR("pending queue resize malloc failed (new cap=%d)", new_cap);
+        return -1;
     }
-    pthread_mutex_unlock(&queue->mutex);
 
-    pthread_mutex_destroy(&queue->mutex);
-    pthread_cond_destroy(&queue->cond_not_empty);
-    pthread_cond_destroy(&queue->cond_not_full);
-    pthread_cond_destroy(&queue->cond_task_done);
-    memset(queue, 0, sizeof(TaskQueue));
+    // 拷贝原有任务
+    for (uint32_t i = 0; i < queue->size; i++) {
+        uint32_t idx = (queue->head + i) % queue->cap;
+        new_tasks[i] = queue->tasks[idx];
+    }
+
+    // 替换队列
+    free(queue->tasks);
+    queue->tasks = new_tasks;
+    queue->cap = new_cap;
+    queue->head = 0;
+    queue->tail = queue->size;
+
+    LOG_INFO("pending queue resize: %d → %d", queue->cap/2, queue->cap);
+    return 0;
 }
 
-// 入队任务（阻塞直到队列非满）
-static int task_queue_push(TaskQueue* queue, const ThreadPoolTask* task) {
+/**
+ * @brief Pending队列入队（缓存任务）
+ */
+static int pending_queue_push(OSPendingTaskQueue* queue, OSThreadPoolTask* task) {
     if (queue == NULL || task == NULL) return -1;
 
     pthread_mutex_lock(&queue->mutex);
 
-    // 队列满则阻塞
-    while (queue->size >= queue->cap && !queue->tasks[0].is_completed) {
-        pthread_cond_wait(&queue->cond_not_full, &queue->mutex);
+    // 队列满则扩容
+    while (queue->size >= queue->cap) {
+        pthread_mutex_unlock(&queue->mutex);
+        if (pending_queue_resize(queue) != 0) {
+            LOG_ERROR("pending queue resize failed, task %lu lost", task->task_id);
+            free(task);
+            return -1;
+        }
+        pthread_mutex_lock(&queue->mutex);
     }
 
-    // 拷贝任务到队列
-    memcpy(&queue->tasks[queue->tail], task, sizeof(ThreadPoolTask));
+    // 入队
+    queue->tasks[queue->tail] = task;
     queue->tail = (queue->tail + 1) % queue->cap;
     queue->size++;
 
-    // 通知队列非空
-    pthread_cond_signal(&queue->cond_not_empty);
+    // 通知asyncPoll有pending任务
+    pthread_cond_signal(&queue->cond_has_task);
     pthread_mutex_unlock(&queue->mutex);
 
+    LOG_INFO("task %lu added to pending queue (pending size=%d)", task->task_id, queue->size);
     return 0;
 }
 
-// 出队任务（阻塞直到队列非空）
-static int task_queue_pop(TaskQueue* queue, ThreadPoolTask* task) {
-    if (queue == NULL || task == NULL) return -1;
+/**
+ * @brief Pending队列出队
+ */
+static OSThreadPoolTask* pending_queue_pop(OSPendingTaskQueue* queue) {
+    if (queue == NULL) return NULL;
 
     pthread_mutex_lock(&queue->mutex);
 
-    // 队列空则阻塞
-    while (queue->size == 0 && !queue->tasks[0].is_completed) {
-        pthread_cond_wait(&queue->cond_not_empty, &queue->mutex);
+    // 无任务则等待
+    while (queue->size == 0) {
+        pthread_cond_wait(&queue->cond_has_task, &queue->mutex);
+        // 被唤醒但仍无任务（销毁时）
+        if (queue->size == 0) {
+            pthread_mutex_unlock(&queue->mutex);
+            return NULL;
+        }
     }
 
-    // 空队列/销毁中，返回失败
-    if (queue->size == 0) {
-        pthread_mutex_unlock(&queue->mutex);
-        return -1;
-    }
-
-    // 取出任务
-    memcpy(task, &queue->tasks[queue->head], sizeof(ThreadPoolTask));
+    // 出队
+    OSThreadPoolTask* task = queue->tasks[queue->head];
     queue->head = (queue->head + 1) % queue->cap;
     queue->size--;
 
-    // 通知队列非满
-    pthread_cond_signal(&queue->cond_not_full);
+    pthread_mutex_unlock(&queue->mutex);
+    return task;
+}
+
+/**
+ * @brief 销毁Pending队列
+ */
+static void pending_queue_destroy(OSPendingTaskQueue* queue) {
+    if (queue == NULL) return;
+
+    pthread_mutex_lock(&queue->mutex);
+
+    // 释放所有pending任务
+    for (uint32_t i = 0; i < queue->size; i++) {
+        uint32_t idx = (queue->head + i) % queue->cap;
+        free(queue->tasks[idx]);
+    }
+
+    free(queue->tasks);
     pthread_mutex_unlock(&queue->mutex);
 
-    return 0;
+    pthread_mutex_destroy(&queue->mutex);
+    pthread_cond_destroy(&queue->cond_has_task);
 }
 
-// 任务完成通知（worker→asyncPoll→外部）
-void notify_task_complete(ThreadPoolHandle handle, ThreadPoolTask* task, bool success) {
-    if (handle == NULL || task == NULL) return;
+// ===================== 任务分配策略（核心） =====================
+/**
+ * @brief 查找最优Worker（优先空闲→最少任务）
+ */
+static int find_best_worker(struct _OSThreadPool* pool) {
+    int target_idx = -1;
+    uint32_t min_task_count = UINT32_MAX;
 
-    pthread_mutex_lock(&handle->global_mutex);
-    task->is_completed = true;
-    pthread_mutex_unlock(&handle->global_mutex);
+    for (int i = 0; i < 64; i++) {
+        OSWorkerThread* worker = &pool->workers[i];
+        pthread_mutex_lock(&worker->mutex);
 
-    // 1. 通知asyncPoll任务完成
-    pthread_cond_signal(&handle->worker_queue.cond_task_done);
-
-    // 2. asyncPoll回调外部（这里直接执行，也可由asyncPoll统一处理）
-    if (task->complete_cb != NULL) {
-        task->complete_cb(task->complete_arg, success);
-    }
-
-    // 3. 释放任务资源（外部参数需自行管理，这里标记完成）
-    TRANSPORT_LOG("INFO", "task %lu completed, success=%d", task->task_id, success);
-}
-
-// ===================== 线程业务逻辑 =====================
-// 1. asyncPoll线程：接收外部中断→入队notifier→监测worker完成→通知外部
-static void* async_poll_thread_func(void* arg) {
-    ThreadPoolHandle handle = (ThreadPoolHandle)arg;
-    ThreadPoolTask task;
-
-    TRANSPORT_LOG("INFO", "asyncPoll thread initialized, waiting for interrupt...");
-
-    // 步骤1：等待线程启动信号（初始化后才运行）
-    pthread_mutex_lock(&handle->global_mutex);
-    while (!handle->is_running && !handle->is_destroying) {
-        pthread_cond_wait(&handle->cond_thread_start, &handle->global_mutex);
-    }
-    pthread_mutex_unlock(&handle->global_mutex);
-
-    if (handle->is_destroying) {
-        pthread_exit(NULL);
-        return NULL;
-    }
-
-    // 步骤2：循环监测外部中断
-    while (!handle->is_destroying) {
-        // 等待外部中断信号
-        pthread_mutex_lock(&handle->global_mutex);
-        pthread_cond_wait(&handle->cond_interrupt, &handle->global_mutex);
-        pthread_mutex_unlock(&handle->global_mutex);
-
-        if (handle->is_destroying) break;
-
-        // 步骤3：从asyncPoll队列取出任务
-        if (task_queue_pop(&handle->async_poll_queue, &task) != 0) {
-            TRANSPORT_LOG("WARN", "asyncPoll queue is empty");
+        // 跳过已销毁/未运行的worker
+        if (!worker->is_running || pool->is_destroying) {
+            pthread_mutex_unlock(&worker->mutex);
             continue;
         }
 
-        // 步骤4：将任务转发到notifier队列
-        task.type = THREAD_TYPE_NOTIFIER;
-        if (task_queue_push(&handle->notifier_queue, &task) != 0) {
-            TRANSPORT_LOG("ERROR", "push task to notifier queue failed, task=%lu", task.task_id);
-            notify_task_complete(handle, &task, false);
-            continue;
+        // 优先选择空闲worker（队列空）
+        if (worker->is_idle && worker->queue_size == 0) {
+            target_idx = i;
+            pthread_mutex_unlock(&worker->mutex);
+            return target_idx;
         }
-        TRANSPORT_LOG("INFO", "asyncPoll push task %lu to notifier queue", task.task_id);
 
-        // 步骤5：等待worker完成任务
-        pthread_mutex_lock(&handle->worker_queue.mutex);
-        while (!task.is_completed && !handle->is_destroying) {
-            pthread_cond_wait(&handle->worker_queue.cond_task_done, &handle->worker_queue.mutex);
+        // 记录任务数最少的worker
+        if (worker->queue_size < min_task_count) {
+            min_task_count = worker->queue_size;
+            target_idx = i;
         }
-        pthread_mutex_unlock(&handle->worker_queue.mutex);
 
-        // 步骤6：通知外部调用者（已在notify_task_complete中执行）
-        TRANSPORT_LOG("INFO", "asyncPoll notify external: task %lu done", task.task_id);
+        pthread_mutex_unlock(&worker->mutex);
     }
 
-    TRANSPORT_LOG("INFO", "asyncPoll thread exit");
-    pthread_exit(NULL);
-    return NULL;
+    return target_idx;
 }
 
-// 2. notifier线程：接收asyncPoll任务→转发worker→通知worker启动
-static void* notifier_thread_func(void* arg) {
-    ThreadPoolHandle handle = (ThreadPoolHandle)arg;
-    ThreadPoolTask task;
-
-    TRANSPORT_LOG("INFO", "notifier thread initialized, waiting for task...");
-
-    // 等待线程启动信号
-    pthread_mutex_lock(&handle->global_mutex);
-    while (!handle->is_running && !handle->is_destroying) {
-        pthread_cond_wait(&handle->cond_thread_start, &handle->global_mutex);
-    }
-    pthread_mutex_unlock(&handle->global_mutex);
-
-    if (handle->is_destroying) {
-        pthread_exit(NULL);
-        return NULL;
-    }
-
-    // 循环转发任务到worker
-    while (!handle->is_destroying) {
-        // 从notifier队列取任务
-        if (task_queue_pop(&handle->notifier_queue, &task) != 0) {
-            usleep(1000); // 空轮询避免CPU占用
-            continue;
-        }
-
-        // 转发到worker队列
-        task.type = THREAD_TYPE_WORKER;
-        if (task_queue_push(&handle->worker_queue, &task) != 0) {
-            TRANSPORT_LOG("ERROR", "push task to worker queue failed, task=%lu", task.task_id);
-            notify_task_complete(handle, &task, false);
-            continue;
-        }
-        TRANSPORT_LOG("INFO", "notifier push task %lu to worker queue", task.task_id);
-    }
-
-    TRANSPORT_LOG("INFO", "notifier thread exit");
-    pthread_exit(NULL);
-    return NULL;
-}
-
-// 3. worker线程：执行任务→释放资源→发送完成信号
+// ===================== Worker线程逻辑 =====================
 static void* worker_thread_func(void* arg) {
-    ThreadPoolHandle handle = (ThreadPoolHandle)arg;
-    ThreadPoolTask task;
-    int thread_id = *(int*)arg;
-    free(arg); // 释放线程ID参数
+    OSWorkerThreadArg* worker_arg = (OSWorkerThreadArg*)arg;
+    struct _OSThreadPool* pool = worker_arg->pool;
+    int worker_idx = worker_arg->worker_idx;
+    free(worker_arg); // 释放参数内存
 
-    TRANSPORT_LOG("INFO", "worker thread %d initialized, waiting for task...", thread_id);
+    OSWorkerThread* worker = &pool->workers[worker_idx];
+    LOG_INFO("worker %d initialized, waiting for start", worker_idx);
 
-    // 等待线程启动信号
-    pthread_mutex_lock(&handle->global_mutex);
-    while (!handle->is_running && !handle->is_destroying) {
-        pthread_cond_wait(&handle->cond_thread_start, &handle->global_mutex);
+    // 等待线程池启动（阻塞）
+    pthread_mutex_lock(&pool->global_mutex);
+    while (!pool->is_running && !pool->is_destroying) {
+        pthread_cond_wait(&pool->cond_interrupt, &pool->global_mutex);
     }
-    pthread_mutex_unlock(&handle->global_mutex);
+    pthread_mutex_unlock(&pool->global_mutex);
 
-    if (handle->is_destroying) {
+    // 线程池已销毁，直接退出
+    if (pool->is_destroying) {
+        LOG_INFO("worker %d exit (pool destroying)", worker_idx);
         pthread_exit(NULL);
         return NULL;
     }
 
-    // 循环执行任务
-    while (!handle->is_destroying) {
-        // 从worker队列取任务（阻塞）
-        if (task_queue_pop(&handle->worker_queue, &task) != 0) {
-            usleep(1000);
+    // 标记worker为运行中+空闲
+    pthread_mutex_lock(&worker->mutex);
+    worker->is_running = true;
+    worker->is_idle = true;
+    pthread_mutex_unlock(&worker->mutex);
+
+    LOG_INFO("worker %d started, waiting for task", worker_idx);
+
+    OSThreadPoolTask task;
+    while (!pool->is_destroying) {
+        // 等待任务通知（自动释放锁，被唤醒后重新加锁）
+        pthread_mutex_lock(&worker->mutex);
+        while (worker->queue_size == 0 && !pool->is_destroying) {
+            worker->is_idle = true;
+            pthread_cond_wait(&worker->cond_task, &worker->mutex);
+        }
+
+        // 线程池销毁，退出循环
+        if (pool->is_destroying) {
+            pthread_mutex_unlock(&worker->mutex);
+            break;
+        }
+
+        // 取出任务，标记为忙碌
+        worker->is_idle = false;
+        int ret = worker_queue_pop(worker, &task);
+        pthread_mutex_unlock(&worker->mutex);
+
+        if (ret != 0) {
+            LOG_WARN("worker %d pop task failed", worker_idx);
             continue;
         }
 
-        if (handle->is_destroying) break;
+        // 更新运行中任务数
+        pthread_mutex_lock(&pool->stats_mutex);
+        pool->running_tasks++;
+        pthread_mutex_unlock(&pool->stats_mutex);
 
-        // 执行任务
-        TRANSPORT_LOG("INFO", "worker %d start processing task %lu", thread_id, task.task_id);
+        // 执行任务（纯C错误处理，无try/catch）
+        LOG_INFO("worker %d start processing task %lu", worker_idx, task.task_id);
         bool success = true;
-
-        // 如果任务函数有返回值，检查返回值
         if (task.task_func != NULL) {
-            // 执行任务函数
-            task.task_func(task.task_arg);
+            task.task_func(task.task_arg); // 执行用户任务
         } else {
             success = false;
-            TRANSPORT_LOG("ERROR", "worker %d task %lu has no func", thread_id, task.task_id);
+            LOG_ERROR("worker %d task %lu has no execute function", worker_idx, task.task_id);
         }
 
-        // 释放资源+发送完成信号
-        notify_task_complete(handle, &task, success);
+        // 任务完成：更新状态和统计
+        task.is_completed = true;
+        pthread_mutex_lock(&pool->stats_mutex);
+        pool->running_tasks--;
+        pool->completed_tasks++;
+        pthread_mutex_unlock(&pool->stats_mutex);
+
+        // 通知外部任务完成
+        if (pool->complete_cb != NULL) {
+            pool->complete_cb(task.task_id, success, pool->cb_user_data);
+        }
+
+        // 销毁任务（参数由用户自行释放）
+        LOG_INFO("worker %d task %lu completed (success=%d)", worker_idx, task.task_id, success);
+
+        // 标记worker为空闲
+        pthread_mutex_lock(&worker->mutex);
+        worker->is_idle = true;
+        pthread_mutex_unlock(&worker->mutex);
+
+        // 通知asyncPoll：有worker空闲，可处理pending任务
+        pthread_cond_signal(&pool->cond_interrupt);
+        pthread_cond_signal(&pool->cond_all_done);
     }
 
-    TRANSPORT_LOG("INFO", "worker thread %d exit", thread_id);
+    // 退出清理
+    pthread_mutex_lock(&worker->mutex);
+    worker->is_running = false;
+    worker->is_idle = true;
+    pthread_mutex_unlock(&worker->mutex);
+
+    LOG_INFO("worker %d exit", worker_idx);
+    pthread_exit(NULL);
+    return NULL;
+}
+
+// ===================== AsyncPoll线程逻辑（调度中枢） =====================
+static void* async_poll_thread_func(void* arg) {
+    struct _OSThreadPool* pool = (struct _OSThreadPool*)arg;
+    LOG_INFO("asyncPoll thread initialized, waiting for start");
+
+    // 等待线程池启动（阻塞）
+    pthread_mutex_lock(&pool->global_mutex);
+    while (!pool->is_running && !pool->is_destroying) {
+        pthread_cond_wait(&pool->cond_interrupt, &pool->global_mutex);
+    }
+    pthread_mutex_unlock(&pool->global_mutex);
+
+    // 线程池已销毁，直接退出
+    if (pool->is_destroying) {
+        LOG_INFO("asyncPoll exit (pool destroying)");
+        pthread_exit(NULL);
+        return NULL;
+    }
+
+    LOG_INFO("asyncPoll thread started, monitoring interrupt");
+
+    while (!pool->is_destroying) {
+        // 第一步：优先处理pending队列（缓存的任务）
+        while (1) {
+            OSThreadPoolTask* pending_task = pending_queue_pop(&pool->pending_queue);
+            if (pending_task == NULL) break;
+
+            // 查找最优worker
+            int target_idx = find_best_worker(pool);
+            if (target_idx < 0) {
+                LOG_WARN("no available worker, re-add task %lu to pending", pending_task->task_id);
+                pending_queue_push(&pool->pending_queue, pending_task);
+                break;
+            }
+
+            // 尝试将pending任务放入worker队列
+            OSWorkerThread* worker = &pool->workers[target_idx];
+            pthread_mutex_lock(&worker->mutex);
+            int ret = worker_queue_push(worker, pending_task);
+            pthread_mutex_unlock(&worker->mutex);
+
+            if (ret == 0) {
+                // 放入成功，通知worker执行
+                pthread_cond_signal(&worker->cond_task);
+                LOG_INFO("asyncPoll assign pending task %lu to worker %d (worker queue size=%d)",
+                         pending_task->task_id, target_idx, worker->queue_size);
+                free(pending_task); // 释放pending任务内存
+            } else {
+                // worker队列仍满，重新加入pending
+                LOG_WARN("worker %d queue full, re-add task %lu to pending", target_idx, pending_task->task_id);
+                pending_queue_push(&pool->pending_queue, pending_task);
+                break;
+            }
+        }
+
+        // 第二步：处理外部通知（任务提交/自定义事件）
+        pthread_mutex_lock(&pool->global_mutex);
+        while (!pool->has_notify && !pool->is_destroying) {
+            pthread_cond_wait(&pool->cond_interrupt, &pool->global_mutex);
+        }
+
+        // 线程池销毁，退出循环
+        if (pool->is_destroying) {
+            pthread_mutex_unlock(&pool->global_mutex);
+            break;
+        }
+
+        // 读取通知信息
+        uint32_t notify_type = pool->notify_type;
+        void* notify_data = pool->notify_data;
+        pool->has_notify = false;
+        pthread_mutex_unlock(&pool->global_mutex);
+
+        // 处理任务提交通知（类型0）
+        if (notify_type == 0) {
+            OSThreadPoolTask* task = (OSThreadPoolTask*)notify_data;
+            if (task == NULL) {
+                LOG_ERROR("asyncPoll receive null task");
+                continue;
+            }
+
+            // 查找最优worker
+            int target_idx = find_best_worker(pool);
+            if (target_idx < 0) {
+                LOG_WARN("no available worker, add task %lu to pending", task->task_id);
+                pending_queue_push(&pool->pending_queue, task);
+                continue;
+            }
+
+            // 尝试放入worker队列
+            OSWorkerThread* worker = &pool->workers[target_idx];
+            pthread_mutex_lock(&worker->mutex);
+            int ret = worker_queue_push(worker, task);
+            pthread_mutex_unlock(&worker->mutex);
+
+            if (ret == 0) {
+                // 放入成功，通知worker执行
+                pthread_cond_signal(&worker->cond_task);
+                LOG_INFO("asyncPoll assign task %lu to worker %d (worker queue size=%d)",
+                         task->task_id, target_idx, worker->queue_size);
+                free(task); // 释放任务内存
+            } else {
+                // worker队列满，加入pending
+                LOG_WARN("worker %d queue full, add task %lu to pending", target_idx, task->task_id);
+                pending_queue_push(&pool->pending_queue, task);
+            }
+        } else {
+            // 处理自定义事件通知（类型1+）
+            LOG_INFO("asyncPoll receive custom notify (type=%d, data=%p)", notify_type, notify_data);
+            // 此处可扩展自定义事件处理逻辑
+        }
+    }
+
+    // 退出前处理剩余pending任务（通知失败）
+    LOG_INFO("asyncPoll exit, processing remaining pending tasks");
+    pthread_mutex_lock(&pool->pending_queue.mutex);
+    for (uint32_t i = 0; i < pool->pending_queue.size; i++) {
+        uint32_t idx = (pool->pending_queue.head + i) % pool->pending_queue.cap;
+        OSThreadPoolTask* task = pool->pending_queue.tasks[idx];
+        if (pool->complete_cb != NULL) {
+            pool->complete_cb(task->task_id, false, pool->cb_user_data);
+        }
+        free(task);
+    }
+    pthread_mutex_unlock(&pool->pending_queue.mutex);
+
+    LOG_INFO("asyncPoll thread exit");
     pthread_exit(NULL);
     return NULL;
 }
 
 // ===================== 对外接口实现 =====================
-// 初始化线程池：1asyncPoll + 1notifier + 64worker（仅初始化，不运行）
-ThreadPoolHandle thread_pool_init(uint32_t queue_cap) {
-    // 1. 分配线程池内存
-    ThreadPoolHandle handle = (ThreadPoolHandle)calloc(1, sizeof(struct _ThreadPool));
-    if (handle == NULL) {
-        TRANSPORT_LOG("ERROR", "malloc thread pool failed");
+/**
+ * @brief 初始化线程池
+ */
+OSThreadPoolHandle os_thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
+    // 参数校验
+    if (worker_queue_cap == 0) {
+        LOG_ERROR("worker queue cap cannot be 0");
         return NULL;
     }
 
-    // 2. 初始化全局同步原语
-    if (pthread_mutex_init(&handle->global_mutex, NULL) != 0 ||
-        pthread_cond_init(&handle->cond_thread_start, NULL) != 0 ||
-        pthread_cond_init(&handle->cond_interrupt, NULL) != 0) {
-        TRANSPORT_LOG("ERROR", "init global cond/mutex failed");
-        free(handle);
+    // 分配线程池内存
+    struct _OSThreadPool* pool = (struct _OSThreadPool*)calloc(1, sizeof(struct _OSThreadPool));
+    if (pool == NULL) {
+        LOG_ERROR("thread pool malloc failed");
         return NULL;
     }
 
-    // 3. 初始化任务队列
-    if (task_queue_init(&handle->async_poll_queue, queue_cap) != 0 ||
-        task_queue_init(&handle->notifier_queue, queue_cap) != 0 ||
-        task_queue_init(&handle->worker_queue, queue_cap) != 0) {
-        TRANSPORT_LOG("ERROR", "init task queues failed");
-        thread_pool_destroy(handle);
+    // 初始化全局同步原语
+    pthread_mutex_init(&pool->global_mutex, NULL);
+    pthread_cond_init(&pool->cond_interrupt, NULL);
+    pthread_cond_init(&pool->cond_all_done, NULL);
+
+    // 初始化任务ID生成器
+    pool->next_task_id = 1;
+    pthread_mutex_init(&pool->task_id_mutex, NULL);
+
+    // 初始化任务统计
+    pool->running_tasks = 0;
+    pool->completed_tasks = 0;
+    pthread_mutex_init(&pool->stats_mutex, NULL);
+
+    // 初始化pending队列
+    if (pending_queue_init(&pool->pending_queue, pending_queue_cap) != 0) {
+        LOG_ERROR("pending queue init failed");
+        os_thread_pool_destroy(pool);
         return NULL;
     }
 
-    // 4. 配置线程数量：固定1/1/64
-    handle->thread_nums[THREAD_TYPE_ASYNC_POLL] = 1;
-    handle->thread_nums[THREAD_TYPE_NOTIFIER] = 1;
-    handle->thread_nums[THREAD_TYPE_WORKER] = 64;
-    handle->is_initialized = true;
-    handle->is_running = false;
-    handle->is_destroying = false;
-    handle->next_task_id = 1;
-
-    // 5. 创建线程（初始化但不运行）
-    // 5.1 创建asyncPoll线程
-    if (pthread_create(&handle->threads[THREAD_TYPE_ASYNC_POLL][0], NULL,
-                       async_poll_thread_func, handle) != 0) {
-        TRANSPORT_LOG("ERROR", "create asyncPoll thread failed");
-        thread_pool_destroy(handle);
-        return NULL;
-    }
-
-    // 5.2 创建notifier线程
-    if (pthread_create(&handle->threads[THREAD_TYPE_NOTIFIER][0], NULL,
-                       notifier_thread_func, handle) != 0) {
-        TRANSPORT_LOG("ERROR", "create notifier thread failed");
-        thread_pool_destroy(handle);
-        return NULL;
-    }
-
-    // 5.3 创建64个worker线程
+    // 初始化64个worker线程
     for (int i = 0; i < 64; i++) {
-        int* thread_id = (int*)malloc(sizeof(int));
-        *thread_id = i;
-        if (pthread_create(&handle->threads[THREAD_TYPE_WORKER][i], NULL,
-                           worker_thread_func, thread_id) != 0) {
-            TRANSPORT_LOG("ERROR", "create worker thread %d failed", i);
-            free(thread_id);
-            thread_pool_destroy(handle);
+        OSWorkerThread* worker = &pool->workers[i];
+        worker->queue_cap = worker_queue_cap;
+        worker->task_queue = (OSThreadPoolTask*)calloc(worker_queue_cap, sizeof(OSThreadPoolTask));
+        if (worker->task_queue == NULL) {
+            LOG_ERROR("worker %d queue malloc failed", i);
+            os_thread_pool_destroy(pool);
+            return NULL;
+        }
+
+        // 初始化worker同步原语
+        pthread_mutex_init(&worker->mutex, NULL);
+        pthread_cond_init(&worker->cond_task, NULL);
+        worker->is_idle = true;
+        worker->is_running = false;
+        worker->queue_head = 0;
+        worker->queue_tail = 0;
+        worker->queue_size = 0;
+
+        // 创建worker线程参数
+        OSWorkerThreadArg* worker_arg = (OSWorkerThreadArg*)malloc(sizeof(OSWorkerThreadArg));
+        worker_arg->pool = pool;
+        worker_arg->worker_idx = i;
+
+        // 创建worker线程（初始化但不运行）
+        if (pthread_create(&worker->tid, NULL, worker_thread_func, worker_arg) != 0) {
+            LOG_ERROR("create worker %d failed (err=%d)", i, errno);
+            free(worker_arg);
+            os_thread_pool_destroy(pool);
             return NULL;
         }
     }
 
-    TRANSPORT_LOG("INFO", "thread pool init success: 1asyncPoll + 1notifier + 64worker");
-    return handle;
-}
-
-// 外部触发中断：通知asyncPoll线程处理任务
-int thread_pool_trigger_interrupt(ThreadPoolHandle handle, ThreadPoolTask* task) {
-    if (handle == NULL || task == NULL || !handle->is_initialized) {
-        TRANSPORT_LOG("ERROR", "invalid param for trigger interrupt");
-        return -1;
+    // 创建asyncPoll线程（初始化但不运行）
+    if (pthread_create(&pool->async_poll_tid, NULL, async_poll_thread_func, pool) != 0) {
+        LOG_ERROR("create asyncPoll thread failed (err=%d)", errno);
+        os_thread_pool_destroy(pool);
+        return NULL;
     }
 
-    // 1. 分配唯一任务ID
-    pthread_mutex_lock(&handle->global_mutex);
-    task->task_id = handle->next_task_id++;
-    task->is_completed = false;
-    pthread_mutex_unlock(&handle->global_mutex);
+    // 标记初始化完成
+    pool->is_initialized = true;
+    pool->is_running = false;
+    pool->is_destroying = false;
+    pool->has_notify = false;
+    pool->complete_cb = NULL;
+    pool->cb_user_data = NULL;
 
-    // 2. 将任务入队asyncPoll队列
-    if (task_queue_push(&handle->async_poll_queue, task) != 0) {
-        TRANSPORT_LOG("ERROR", "push task %lu to asyncPoll queue failed", task->task_id);
-        return -1;
-    }
-
-    // 3. 发送中断信号给asyncPoll线程
-    pthread_cond_signal(&handle->cond_interrupt);
-    TRANSPORT_LOG("INFO", "trigger interrupt success, task %lu", task->task_id);
-
-    return 0;
+    LOG_INFO("thread pool init success: 1asyncPoll + 64workers (worker cap=%d, pending cap=%d)",
+             worker_queue_cap, pool->pending_queue.cap);
+    return (OSThreadPoolHandle)pool;
 }
 
-// 启动所有线程（初始化后调用，线程开始工作）
-int thread_pool_start(ThreadPoolHandle handle) {
+/**
+ * @brief 启动线程池
+ */
+int os_thread_pool_start(OSThreadPoolHandle handle) {
     if (handle == NULL || !handle->is_initialized || handle->is_running) {
-        TRANSPORT_LOG("ERROR", "invalid thread pool state for start");
+        LOG_ERROR("invalid thread pool state (initialized=%d, running=%d)",
+                 handle->is_initialized, handle->is_running);
         return -1;
     }
 
-    // 发送启动信号，唤醒所有阻塞的线程
+    // 标记运行状态，唤醒所有线程
     pthread_mutex_lock(&handle->global_mutex);
     handle->is_running = true;
-    pthread_cond_broadcast(&handle->cond_thread_start);
+    pthread_cond_broadcast(&handle->cond_interrupt); // 唤醒所有阻塞的线程
     pthread_mutex_unlock(&handle->global_mutex);
 
-    TRANSPORT_LOG("INFO", "thread pool start success, all threads are running");
+    LOG_INFO("thread pool start success");
     return 0;
 }
 
-// 销毁线程池：等待所有任务完成后退出
-void thread_pool_destroy(ThreadPoolHandle handle) {
+/**
+ * @brief 外部提交任务
+ */
+uint64_t os_thread_pool_submit_task(OSThreadPoolHandle handle,
+                                    void (*task_func)(void* arg),
+                                    void* task_arg,
+                                    OSTaskCompleteCb complete_cb,
+                                    void* user_data) {
+    // 参数校验
+    if (handle == NULL || !handle->is_initialized || handle->is_destroying || task_func == NULL) {
+        LOG_ERROR("invalid param (handle=%p, initialized=%d, destroying=%d, task_func=%p)",
+                 handle, handle->is_initialized, handle->is_destroying, task_func);
+        return 0;
+    }
+
+    // 生成唯一任务ID（互斥锁保护）
+    pthread_mutex_lock(&handle->task_id_mutex);
+    uint64_t task_id = handle->next_task_id++;
+    pthread_mutex_unlock(&handle->task_id_mutex);
+
+    // 构造任务（堆分配，避免栈内存失效）
+    OSThreadPoolTask* task = (OSThreadPoolTask*)malloc(sizeof(OSThreadPoolTask));
+    if (task == NULL) {
+        LOG_ERROR("task %lu malloc failed", task_id);
+        return 0;
+    }
+    task->task_id = task_id;
+    task->task_func = task_func;
+    task->task_arg = task_arg;
+    task->is_completed = false;
+
+    // 保存回调函数
+    handle->complete_cb = complete_cb;
+    handle->cb_user_data = user_data;
+
+    // 触发asyncPoll中断（通知有任务提交）
+    pthread_mutex_lock(&handle->global_mutex);
+    handle->notify_type = 0;
+    handle->notify_data = task;
+    handle->has_notify = true;
+    pthread_cond_signal(&handle->cond_interrupt); // 唤醒asyncPoll
+    pthread_mutex_unlock(&handle->global_mutex);
+
+    LOG_INFO("submit task %lu success", task_id);
+    return task_id;
+}
+
+/**
+ * @brief 通用通知asyncPoll接口
+ */
+int os_async_poll_notify(OSThreadPoolHandle handle, uint32_t notify_type, void* data) {
+    if (handle == NULL || !handle->is_initialized || handle->is_destroying) {
+        LOG_ERROR("invalid param (handle=%p, initialized=%d, destroying=%d)",
+                 handle, handle->is_initialized, handle->is_destroying);
+        return -1;
+    }
+
+    // 触发asyncPoll中断
+    pthread_mutex_lock(&handle->global_mutex);
+    handle->notify_type = notify_type;
+    handle->notify_data = data;
+    handle->has_notify = true;
+    pthread_cond_signal(&handle->cond_interrupt);
+    pthread_mutex_unlock(&handle->global_mutex);
+
+    LOG_INFO("notify asyncPoll (type=%d, data=%p)", notify_type, data);
+    return 0;
+}
+
+/**
+ * @brief 销毁线程池
+ */
+void os_thread_pool_destroy(OSThreadPoolHandle handle) {
     if (handle == NULL) return;
 
-    TRANSPORT_LOG("INFO", "thread pool destroying...");
+    LOG_INFO("thread pool destroying...");
 
-    // 1. 标记销毁状态
+    // 标记销毁状态，唤醒所有线程
     pthread_mutex_lock(&handle->global_mutex);
     handle->is_destroying = true;
     handle->is_running = false;
-    // 唤醒所有阻塞的线程
-    pthread_cond_broadcast(&handle->cond_thread_start);
-    pthread_cond_broadcast(&handle->cond_interrupt);
+    handle->has_notify = true;
+    pthread_cond_broadcast(&handle->cond_interrupt); // 唤醒asyncPoll
+    pthread_cond_broadcast(&handle->pending_queue.cond_has_task); // 唤醒pending队列
     pthread_mutex_unlock(&handle->global_mutex);
 
-    // 2. 唤醒所有队列的阻塞线程
-    pthread_cond_broadcast(&handle->async_poll_queue.cond_not_empty);
-    pthread_cond_broadcast(&handle->notifier_queue.cond_not_empty);
-    pthread_cond_broadcast(&handle->worker_queue.cond_not_empty);
+    // 等待asyncPoll线程退出
+    pthread_join(handle->async_poll_tid, NULL);
 
-    // 3. 等待所有线程退出
-    // 3.1 asyncPoll线程
-    pthread_join(handle->threads[THREAD_TYPE_ASYNC_POLL][0], NULL);
-    // 3.2 notifier线程
-    pthread_join(handle->threads[THREAD_TYPE_NOTIFIER][0], NULL);
-    // 3.3 worker线程（64个）
+    // 等待64个worker线程退出并清理
     for (int i = 0; i < 64; i++) {
-        pthread_join(handle->threads[THREAD_TYPE_WORKER][i], NULL);
+        OSWorkerThread* worker = &handle->workers[i];
+        pthread_cond_broadcast(&worker->cond_task); // 唤醒阻塞的worker
+        pthread_join(worker->tid, NULL);
+
+        // 释放worker队列和同步原语
+        free(worker->task_queue);
+        pthread_mutex_destroy(&worker->mutex);
+        pthread_cond_destroy(&worker->cond_task);
     }
 
-    // 4. 销毁任务队列
-    task_queue_destroy(&handle->async_poll_queue);
-    task_queue_destroy(&handle->notifier_queue);
-    task_queue_destroy(&handle->worker_queue);
+    // 销毁pending队列
+    pending_queue_destroy(&handle->pending_queue);
 
-    // 5. 销毁全局同步原语
+    // 销毁全局同步原语
     pthread_mutex_destroy(&handle->global_mutex);
-    pthread_cond_destroy(&handle->cond_thread_start);
     pthread_cond_destroy(&handle->cond_interrupt);
+    pthread_cond_destroy(&handle->cond_all_done);
 
-    // 6. 释放内存
+    // 销毁任务ID和统计锁
+    pthread_mutex_destroy(&handle->task_id_mutex);
+    pthread_mutex_destroy(&handle->stats_mutex);
+
+    // 释放线程池内存
     free(handle);
-    TRANSPORT_LOG("INFO", "thread pool destroy success");
+    LOG_INFO("thread pool destroy success");
 }
