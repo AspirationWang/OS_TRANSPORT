@@ -115,7 +115,7 @@ static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task) {
     while (queue->size >= queue->cap) {
         pthread_mutex_unlock(&queue->mutex);
         if (pending_queue_resize(queue) != 0) {
-            LOG_ERROR("Task %lu lost (pending queue resize failed)", task->task_id);
+            LOG_ERROR("task %lu lost (pending queue resize failed)", task->task_id);
             free(task);
             return -1;
         }
@@ -127,59 +127,52 @@ static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task) {
     queue->tail = (queue->tail + 1) % queue->cap;
     queue->size++;
 
-    // 唤醒等待的asyncPoll
+    // 关键：加锁范围内发送signal，确保信号不丢失
     pthread_cond_signal(&queue->cond_has_task);
     pthread_mutex_unlock(&queue->mutex);
 
-    LOG_INFO("Task %lu added to pending queue (size=%d)", task->task_id, queue->size);
+    LOG_INFO("task %lu added to pending queue (size=%d)", task->task_id, queue->size);
     return 0;
 }
 
 /**
- * @brief Pending队列出队（带超时，避免卡死）
+ * @brief Pending队列出队（无超时，仅靠业务逻辑）
+ * @param queue pending队列指针
+ * @param pool 线程池指针（感知全局销毁状态）
+ * @return 任务指针（NULL=队列销毁/无任务）
  */
 static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue, struct _ThreadPool* pool) {
     if (queue == NULL || pool == NULL) return NULL;
 
     pthread_mutex_lock(&queue->mutex);
 
-    // 超时时间（500ms）
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_nsec += 500 * 1000 * 1000;
-    if (timeout.tv_nsec >= 1000 * 1000 * 1000) {
-        timeout.tv_sec += 1;
-        timeout.tv_nsec -= 1000 * 1000 * 1000;
-    }
-
-    // 循环等待：队列空 + 未销毁
+    // 核心循环：队列空 + 未销毁 → 阻塞等待
+    // 循环条件必须同时判断「队列销毁」和「线程池销毁」，避免卡死
     while (queue->size == 0 && !queue->is_destroying && !pool->is_destroying) {
-        int ret = pthread_cond_timedwait(&queue->cond_has_task, &queue->mutex, &timeout);
-        if (ret == ETIMEDOUT) {
-            LOG_INFO("Pending queue pop timeout (size=%d, destroying=%d)",
-                     queue->size, pool->is_destroying);
-            continue;
-        } else if (ret != 0) {
-            LOG_ERROR("pthread_cond_timedwait failed (err=%d)", ret);
+        // 纯业务逻辑等待，无超时
+        int ret = pthread_cond_wait(&queue->cond_has_task, &queue->mutex);
+        if (ret != 0) {
+            LOG_ERROR("pthread_cond_wait failed (err=%d)", ret);
             pthread_mutex_unlock(&queue->mutex);
             return NULL;
         }
     }
 
-    // 销毁则退出
+    // 场景1：销毁触发 → 直接退出
     if (queue->is_destroying || pool->is_destroying) {
         pthread_mutex_unlock(&queue->mutex);
-        LOG_INFO("Pending queue pop exit (destroying)");
+        LOG_INFO("pending queue pop exit (destroying: queue=%d, pool=%d)",
+                 queue->is_destroying, pool->is_destroying);
         return NULL;
     }
 
-    // 正常出队
+    // 场景2：有任务 → 正常出队
     ThreadPoolTask* task = queue->tasks[queue->head];
     queue->head = (queue->head + 1) % queue->cap;
     queue->size--;
 
     pthread_mutex_unlock(&queue->mutex);
-    LOG_INFO("Task %lu pop from pending queue (remaining=%d)", task->task_id, queue->size);
+    LOG_INFO("task %lu pop from pending queue (remaining size=%d)", task->task_id, queue->size);
     return task;
 }
 
@@ -624,10 +617,16 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     handle->is_destroying = true;
     handle->is_running = false;
     handle->has_notify = true;
-    pthread_cond_broadcast(&handle->cond_interrupt);
+    pthread_cond_broadcast(&handle->cond_interrupt); // 唤醒asyncPoll
     pthread_mutex_unlock(&handle->global_mutex);
 
-    // 唤醒所有Worker
+    // 第二步：强制唤醒pending队列的所有wait线程（核心！）
+    pthread_mutex_lock(&handle->pending_queue.mutex);
+    handle->pending_queue.is_destroying = true; // 标记队列销毁
+    pthread_cond_broadcast(&handle->pending_queue.cond_has_task); // 广播唤醒
+    pthread_mutex_unlock(&handle->pending_queue.mutex);
+
+    // 第三步：唤醒所有worker线程
     for (int i = 0; i < 64; i++) {
         WorkerThread* worker = &handle->workers[i];
         pthread_mutex_lock(&worker->mutex);
