@@ -10,33 +10,33 @@
 typedef struct {
     uint64_t task_id;                 // 唯一任务ID
     void (*task_func)(void* arg);     // 任务执行函数
-    void* task_arg;                   // 任务参数
+    void* task_arg;                   // 任务参数（用户自行管理内存）
     bool is_completed;                // 任务完成标记
 } ThreadPoolTask;
 
 /**
- * @brief 任务完成回调函数（通知外部任务结果）
+ * @brief 任务完成回调函数
  * @param task_id 任务ID
- * @param success 任务是否执行成功
+ * @param success 执行结果（true=成功，false=失败）
  * @param user_data 外部透传数据
  */
 typedef void (*TaskCompleteCb)(uint64_t task_id, bool success, void* user_data);
 
 /**
- * @brief 线程池句柄（对外隐藏内部结构）
+ * @brief 线程池句柄（隐藏内部实现）
  */
 typedef struct _ThreadPool* ThreadPoolHandle;
 
 /**
- * @brief 初始化线程池（1个asyncPoll + 64个worker，仅初始化不运行）
- * @param worker_queue_cap 每个worker队列容量
- * @param pending_queue_cap 全局pending队列初始容量（0=默认1024）
+ * @brief 初始化线程池（1个asyncPoll + 64个Worker，仅初始化不运行）
+ * @param worker_queue_cap 单个Worker队列容量（建议≥2）
+ * @param pending_queue_cap 全局Pending队列初始容量（0=默认1024）
  * @return 线程池句柄（NULL=失败）
  */
 ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap);
 
 /**
- * @brief 启动线程池（所有线程开始等待任务）
+ * @brief 启动线程池（仅启动asyncPoll，Worker按需唤醒）
  * @param handle 线程池句柄
  * @return 0=成功，-1=失败
  */
@@ -46,7 +46,7 @@ int thread_pool_start(ThreadPoolHandle handle);
  * @brief 外部提交任务（触发中断，通知asyncPoll处理）
  * @param handle 线程池句柄
  * @param task_func 任务执行函数
- * @param task_arg 任务参数（需用户自行管理内存）
+ * @param task_arg 任务参数
  * @param complete_cb 任务完成回调
  * @param user_data 回调透传数据
  * @return 任务ID（0=失败）
@@ -58,16 +58,16 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                  void* user_data);
 
 /**
- * @brief 通知asyncPoll线程（通用接口，支持自定义事件）
+ * @brief 通用通知asyncPoll接口（支持自定义事件）
  * @param handle 线程池句柄
- * @param notify_type 通知类型（0=任务提交，1+自定义）
- * @param data 通知附带数据（需用户自行管理内存）
+ * @param notify_type 通知类型（0=任务提交，1+=自定义事件）
+ * @param data 通知数据（用户自行管理内存）
  * @return 0=成功，-1=失败
  */
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
 
 /**
- * @brief 销毁线程池（等待所有任务完成后释放资源）
+ * @brief 销毁线程池（等待所有任务完成，释放资源）
  * @param handle 线程池句柄
  */
 void thread_pool_destroy(ThreadPoolHandle handle);

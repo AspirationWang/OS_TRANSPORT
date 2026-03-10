@@ -7,31 +7,34 @@
 #include <stdbool.h>
 
 /**
- * @brief Worker线程参数（传递pool和索引）
+ * @brief Worker线程状态枚举
  */
-typedef struct {
-    struct _ThreadPool* pool;
-    int worker_idx;
-} WorkerThreadArg;
+typedef enum {
+    WORKER_STATE_INIT = 0,    // 初始化未运行
+    WORKER_STATE_IDLE = 1,    // 空闲（已启动，等待任务）
+    WORKER_STATE_BUSY = 2,    // 忙碌（执行任务）
+    WORKER_STATE_EXIT = 3     // 退出
+} WorkerState;
 
 /**
  * @brief Worker线程结构体
  */
 typedef struct {
     pthread_t tid;                  // 线程ID
-    bool is_idle;                   // 是否空闲（无任务运行）
-    bool is_running;                // 是否处于运行状态
+    WorkerState state;            // 线程状态
     ThreadPoolTask* task_queue;   // 环形任务队列
     uint32_t queue_cap;             // 队列容量
     uint32_t queue_head;            // 队列头指针
     uint32_t queue_tail;            // 队列尾指针
     uint32_t queue_size;            // 当前任务数
     pthread_mutex_t mutex;          // 队列/状态锁
-    pthread_cond_t cond_task;       // 任务通知条件变量
+    pthread_cond_t cond_task;       // 任务通知条件变量（唤醒Worker执行）
+    int worker_idx;                 // Worker索引
+    struct _ThreadPool* pool;     // 关联的线程池
 } WorkerThread;
 
 /**
- * @brief 全局Pending队列（缓存队列满的任务）
+ * @brief 全局Pending队列（缓存Worker队列满的任务）
  */
 typedef struct {
     ThreadPoolTask** tasks;       // 任务指针数组
@@ -41,7 +44,7 @@ typedef struct {
     uint32_t tail;                  // 尾指针
     pthread_mutex_t mutex;          // 队列锁
     pthread_cond_t cond_has_task;   // 有任务通知条件
-    bool is_destroying;             // 队列销毁标记（关联线程池）
+    bool is_destroying;             // 销毁标记
 } PendingTaskQueue;
 
 /**
@@ -50,9 +53,9 @@ typedef struct {
 struct _ThreadPool {
     // 线程基础配置
     pthread_t async_poll_tid;       // asyncPoll线程ID
-    WorkerThread workers[64];     // 64个worker线程
+    WorkerThread workers[64];     // 64个Worker线程
     bool is_initialized;            // 初始化完成标记
-    bool is_running;                // 线程池是否启动
+    bool is_running;                // 线程池运行标记
     bool is_destroying;             // 销毁标记
 
     // 任务ID生成（互斥锁保护）
@@ -73,7 +76,7 @@ struct _ThreadPool {
     TaskCompleteCb complete_cb;   // 任务完成回调
     void* cb_user_data;             // 回调透传数据
 
-    // 任务统计（互斥锁保护）
+    // 任务统计
     uint32_t running_tasks;         // 运行中任务数
     uint32_t completed_tasks;       // 已完成任务数
     pthread_mutex_t stats_mutex;    // 统计锁
