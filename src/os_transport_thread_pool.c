@@ -21,7 +21,7 @@
 /**
  * @brief Worker队列入队
  */
-static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {LOG_INFOLOG_INFO
+static int worker_queue_push(WorkerThread* worker, const ThreadPoolTask* task) {
     if (worker == NULL || task == NULL || worker->queue_size >= worker->queue_cap) {
         return -1;
     }
