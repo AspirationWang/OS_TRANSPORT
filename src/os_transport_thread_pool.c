@@ -217,7 +217,7 @@ static void* worker_thread_func(void* arg) {
         // 标记为忙碌状态
         worker->state = WORKER_STATE_BUSY;
 
-        // 取出队列头部任务
+        // 取出队列头部任务（修正：task_queue是ThreadPoolTask*数组）
         ThreadPoolTask* task = worker->task_queue[worker->queue_head];
         worker->queue_head = (worker->queue_head + 1) % worker->queue_cap;
         worker->queue_size--;
@@ -314,7 +314,7 @@ static void* async_poll_thread_func(void* arg) {
                         continue;
                     }
 
-                    // 任务入worker队列
+                    // 任务入worker队列（修正：task_queue是ThreadPoolTask*数组）
                     worker->task_queue[worker->queue_tail] = task;
                     worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
                     worker->queue_size++;
@@ -382,9 +382,9 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
         worker->worker_idx = i;
         worker->pool = handle;
 
-        // 初始化worker任务队列
+        // 初始化worker任务队列（修正：分配ThreadPoolTask*数组）
         worker->queue_cap = worker_queue_cap;
-        worker->task_queue = (ThreadPoolTask*)calloc(worker_queue_cap, sizeof(ThreadPoolTask));
+        worker->task_queue = (ThreadPoolTask**)calloc(worker_queue_cap, sizeof(ThreadPoolTask*));
         if (!worker->task_queue) goto err_cleanup;
 
         // 初始化worker锁和条件变量
@@ -598,7 +598,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
             continue;
         }
 
-        // 入worker队列
+        // 入worker队列（修正：task_queue是ThreadPoolTask*数组）
         worker->task_queue[worker->queue_tail] = new_task;
         worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
         worker->queue_size++;
@@ -658,7 +658,7 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     }
     pthread_mutex_unlock(&handle->global_mutex);
 
-    // 清理worker队列剩余任务
+    // 清理worker队列剩余任务（修正：task_queue是ThreadPoolTask*数组）
     for (int i = 0; i < 64; i++) {
         WorkerThread* worker = &handle->workers[i];
         pthread_mutex_lock(&worker->mutex);
