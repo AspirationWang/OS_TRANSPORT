@@ -57,7 +57,7 @@ int main() {
     async_poll_notify(pool, 1, "custom notify data");
 
     // 6. 等待任务完成（实际业务中可根据需求调整）
-    sleep(2);
+    sleep(20);
 
     // 7. 销毁线程池
     thread_pool_destroy(pool);
