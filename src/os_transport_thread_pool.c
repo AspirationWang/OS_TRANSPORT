@@ -502,7 +502,7 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
     pool->notify_queue = (NotifyItem*)calloc(pool->notify_queue_cap, sizeof(NotifyItem));
     if (pool->notify_queue == NULL) {
         LOG_ERROR("Notify queue malloc failed");
-        os_thread_pool_destroy(pool);
+        thread_pool_destroy(pool);
         return NULL;
     }
     pool->notify_queue_head = 0;
