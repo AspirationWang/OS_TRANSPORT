@@ -353,6 +353,7 @@ static void* async_poll_thread_func(void* arg) {
                 LOG_ERROR("AsyncPoll receive null task");
                 continue;
             }
+            LOG_INFO("[NOTIFY] Process Notify: type=%d, data=%p", notify_type, notify_data);
             LOG_INFO("[WZY] Start to do task:%lu.", task->task_id);
 
             // 找最优Worker（不变）
@@ -562,6 +563,7 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
 
     // 触发AsyncPoll中断
     pthread_mutex_lock(&handle->global_mutex);
+    LOG_INFO("[NOTIFY] Submit Task %lu: notify_data=%p (old=%p)", task_id, task, handle->notify_data); // 打印新旧地址
     handle->notify_type = 0;
     handle->notify_data = task;
     handle->has_notify = true;
