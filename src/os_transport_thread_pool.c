@@ -21,6 +21,7 @@ static void task_complete(ThreadPoolHandle handle, uint64_t task_id, bool succes
  * @brief Worker线程任务队列入队
  */
 static int worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
+    LOG_DEBUG("[WZY] Enter into function worker_queue_push");
     if (!worker || !task) {
         LOG_ERROR("worker_queue_push invalid param");
         return -1;
@@ -48,6 +49,7 @@ static int worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
  * @brief Worker线程任务队列出队
  */
 static ThreadPoolTask* worker_queue_pop(WorkerThread* worker) {
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop");
     if (!worker) {
         LOG_ERROR("worker_queue_pop invalid param");
         return NULL;
@@ -449,24 +451,27 @@ static void* worker_thread(void* arg) {
 
     // 主循环：处理任务
     while (!handle->is_destroying) {
+        LOG_INFO("[WZY] break1:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         ThreadPoolTask* task = NULL;
 
         // 等待任务通知
         pthread_mutex_lock(&worker->mutex);
+        LOG_INFO("[WZY] break2:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         while (worker->queue_size == 0 && !handle->is_destroying && worker->state != WORKER_STATE_EXIT) {
             worker->state = WORKER_STATE_IDLE;
             pthread_cond_wait(&worker->cond_task, &worker->mutex);
         }
-
+        LOG_INFO("[WZY] break3:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         // 检查退出条件
         if (handle->is_destroying || worker->state == WORKER_STATE_EXIT) {
             pthread_mutex_unlock(&worker->mutex);
             break;
         }
-
+        LOG_INFO("[WZY] break4:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         // 取出任务，设置为BUSY状态
         task = worker_queue_pop(worker);
         worker->state = WORKER_STATE_BUSY;
+        LOG_INFO("[WZY] break5:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         pthread_mutex_unlock(&worker->mutex);
 
         // 执行任务
