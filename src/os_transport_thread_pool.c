@@ -218,7 +218,7 @@ static void* worker_thread_func(void* arg) {
         worker->state = WORKER_STATE_BUSY;
 
         // 取出队列头部任务
-        ThreadPoolTask task = worker->task_queue[worker->queue_head];
+        ThreadPoolTask* task = worker->task_queue[worker->queue_head];
         worker->queue_head = (worker->queue_head + 1) % worker->queue_cap;
         worker->queue_size--;
 
