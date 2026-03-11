@@ -12,7 +12,7 @@ static int pending_queue_push(PendingTaskQueue* queue, ThreadPoolTask* task);
 static ThreadPoolTask* pending_queue_pop(PendingTaskQueue* queue);
 static int notify_queue_push(ThreadPoolHandle handle, uint32_t notify_type, void* data);
 static NotifyItem* notify_queue_pop(ThreadPoolHandle handle);
-static int select_best_worker(ThreadPoolHandle handle, bool is_batch);
+static int select_best_worker(ThreadPoolHandle handle);
 static void worker_process_pending(ThreadPoolHandle handle, WorkerThread* worker);
 static void task_complete(ThreadPoolHandle handle, uint64_t task_id, bool success);
 
@@ -217,10 +217,9 @@ static NotifyItem* notify_queue_pop(ThreadPoolHandle handle) {
 /**
  * @brief 选择最优Worker线程
  * @param handle 线程池句柄
- * @param is_batch 是否批量任务（批量任务需保证选同一个worker）
  * @return 最优worker索引（-1=失败）
  */
-static int select_best_worker(ThreadPoolHandle handle, bool is_batch) {
+static int select_best_worker(ThreadPoolHandle handle) {
     if (!handle) {
         LOG_ERROR("select_best_worker invalid param");
         return -1;
@@ -375,7 +374,7 @@ static void* async_poll_thread(void* arg) {
                 ThreadPoolTask* task = (ThreadPoolTask*)notify->data;
                 if (task) {
                     // 选择最优worker
-                    int worker_idx = select_best_worker(handle, false);
+                    int worker_idx = select_best_worker(handle);
                     if (worker_idx >= 0) {
                         WorkerThread* worker = &handle->workers[worker_idx];
                         // 尝试入worker队列，失败则入pending队列
@@ -756,7 +755,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
     pthread_mutex_unlock(&handle->task_id_mutex);
 
     // 选择单个worker保证执行顺序
-    int worker_idx = select_best_worker(handle, true);
+    int worker_idx = select_best_worker(handle);
     if (worker_idx < 0) {
         LOG_ERROR("select worker for batch tasks failed");
         free(task_ids);
