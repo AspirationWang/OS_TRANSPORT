@@ -61,8 +61,8 @@ int main() {
 
     // 7. 销毁线程池
     thread_pool_destroy(pool);
-    free(batch_tasks);
-    free(batch_ids);
+    // free(batch_tasks);
+    // free(batch_ids);
 
     return 0;
 }
