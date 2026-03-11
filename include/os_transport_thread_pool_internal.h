@@ -86,6 +86,10 @@ struct _ThreadPool {
     uint32_t completed_tasks;       // 已完成任务数
     pthread_mutex_t stats_mutex;    // 统计锁
 
+    pthread_cond_t cond_start;       // 线程启动信号
+    pthread_mutex_t start_mutex;     // 启动控制锁
+    bool is_started;                 // 线程池是否已启动
+
     // 全局Pending队列
     PendingTaskQueue pending_queue;
 

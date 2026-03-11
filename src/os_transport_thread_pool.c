@@ -199,6 +199,21 @@ static void* worker_thread_func(void* arg) {
     WorkerThread* worker = (WorkerThread*)arg;
     ThreadPoolHandle pool = worker->pool;
 
+    // 线程启动前阻塞，等待thread_pool_start信号
+    pthread_mutex_lock(&pool->start_mutex);
+    while (!pool->is_started && !pool->is_destroying) {
+        pthread_cond_wait(&pool->cond_start, &pool->start_mutex);
+    }
+    pthread_mutex_unlock(&pool->start_mutex);
+
+    // 如果启动前已标记销毁，直接退出
+    if (pool->is_destroying) {
+        pthread_mutex_lock(&worker->mutex);
+        worker->state = WORKER_STATE_EXIT;
+        pthread_mutex_unlock(&worker->mutex);
+        return NULL;
+    }
+
     while (1) {
         pthread_mutex_lock(&worker->mutex);
 
@@ -273,7 +288,17 @@ static void* worker_thread_func(void* arg) {
  */
 static void* async_poll_thread_func(void* arg) {
     ThreadPoolHandle pool = (ThreadPoolHandle)arg;
+    // 线程启动前阻塞，等待thread_pool_start信号
+    pthread_mutex_lock(&pool->start_mutex);
+    while (!pool->is_started && !pool->is_destroying) {
+        pthread_cond_wait(&pool->cond_start, &pool->start_mutex);
+    }
+    pthread_mutex_unlock(&pool->start_mutex);
 
+    // 如果启动前已标记销毁，直接退出
+    if (pool->is_destroying) {
+        return NULL;
+    }
     while (1) {
         pthread_mutex_lock(&pool->global_mutex);
 
@@ -375,6 +400,10 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
     handle->notify_queue = (NotifyItem*)calloc(64, sizeof(NotifyItem));
     if (!handle->notify_queue) goto err_cleanup;
 
+    // 初始化启动控制的锁和条件变量
+    pthread_mutex_init(&handle->start_mutex, NULL);
+    pthread_cond_init(&handle->cond_start, NULL);
+    handle->is_started = false; // 初始未启动
     // 初始化64个Worker线程（创建后挂起）
     for (int i = 0; i < 64; i++) {
         WorkerThread* worker = &handle->workers[i];
@@ -382,7 +411,7 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
         worker->worker_idx = i;
         worker->pool = handle;
 
-        // 初始化worker任务队列（修正：分配ThreadPoolTask*数组）
+        // 初始化worker任务队列
         worker->queue_cap = worker_queue_cap;
         worker->task_queue = (ThreadPoolTask**)calloc(worker_queue_cap, sizeof(ThreadPoolTask*));
         if (!worker->task_queue) goto err_cleanup;
@@ -400,11 +429,6 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
             goto err_cleanup;
         }
         pthread_attr_destroy(&attr);
-
-        // Linux下挂起线程（非跨平台，可替换为状态控制）
-        #ifdef __linux__
-        pthread_suspend_np(worker->tid);
-        #endif
     }
 
     // 创建asyncPoll线程（挂起状态）
@@ -416,9 +440,6 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
         goto err_cleanup;
     }
     pthread_attr_destroy(&async_attr);
-    #ifdef __linux__
-    pthread_suspend_np(handle->async_poll_tid);
-    #endif
 
     // 初始化全局pending队列
     handle->pending_queue.cap = pending_queue_cap;
@@ -479,16 +500,12 @@ int thread_pool_start(ThreadPoolHandle handle) {
         return -1;
     }
 
-    // 恢复asyncPoll线程（Linux）
-    #ifdef __linux__
-    pthread_resume_np(handle->async_poll_tid);
-    #else
     // 非Linux系统：通过条件变量唤醒
     pthread_mutex_lock(&handle->global_mutex);
     handle->is_running = true;
+    handle->is_running = true;
     pthread_cond_signal(&handle->cond_interrupt);
     pthread_mutex_unlock(&handle->global_mutex);
-    #endif
 
     handle->is_running = true;
     return 0;
@@ -679,6 +696,9 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     if (handle->pending_queue.tasks) free(handle->pending_queue.tasks);
     pthread_mutex_destroy(&handle->pending_queue.mutex);
     pthread_cond_destroy(&handle->pending_queue.cond_has_task);
+    // 销毁启动控制的锁和条件变量
+    pthread_mutex_destroy(&handle->start_mutex);
+    pthread_cond_destroy(&handle->cond_start);
 
     // 清理全局锁和条件变量
     pthread_mutex_destroy(&handle->task_id_mutex);
