@@ -38,7 +38,7 @@ int main() {
     // 4. 提交批量任务
     uint32_t batch_count = 3;
     ThreadPoolTask* batch_tasks = malloc(batch_count * sizeof(ThreadPoolTask));
-    for (int i = 0; i < batch_count; i++) {
+    for (uint32_t i = 0; i < batch_count; i++) {
         uint32_t* arg = malloc(sizeof(uint32_t));
         *arg = i + 2;
         batch_tasks[i].task_func = demo_task;
@@ -46,7 +46,7 @@ int main() {
     }
     uint64_t* batch_ids = thread_pool_submit_batch_tasks(pool, batch_tasks, batch_count, demo_complete_cb, "batch task");
     printf("submit batch tasks, ids:");
-    for (int i = 0; i < batch_count; i++) {
+    for (uint32_t i = 0; i < batch_count; i++) {
         printf(" %lu", batch_ids[i]);
     }
     printf("\n");

@@ -485,8 +485,8 @@ static void* worker_thread(void* arg) {
             task_complete(handle, task->task_id, success);
             
             // 释放任务内存（用户参数由用户管理，此处释放任务结构体）
-            free(task);
             LOG_DEBUG("worker[%d] task[%lu] released", worker->worker_idx, task->task_id);
+            free(task);
 
             // 尝试拉取pending队列任务
             worker_process_pending(handle, worker);
