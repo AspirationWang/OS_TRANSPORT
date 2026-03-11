@@ -23,18 +23,11 @@ typedef struct os_transport_cfg {
     uint32_t     reserved2[10];
 } os_transport_cfg_t;
 
-typedef struct worker_task {
-    uint64_t task_id;
-    void (*task_func)(void* arg);
-    void* task_arg;
-    bool is_completed;
-} worker_task_t;
-
 typedef enum {
     NULL_TASK = 0,
     SEND_TASK,
     RECV_TASK,
-}task_type_t;
+} task_type_t;
 
 typedef struct {
 
@@ -43,6 +36,12 @@ typedef struct {
 typedef struct {
 
 } h2d_info_t;
+
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    int request_completed; // 该请求的所有task是否都已完成
+} task_sync_t;
 
 // send类型的task参数，包括：
 // 1. urma_write相关参数
@@ -68,11 +67,7 @@ typedef struct {
     bool is_last_chunk;
 } recv_task_arg_t;
 
-typedef struct {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int request_completed; // 该请求的所有task是否都已完成
-} task_sync_t;
+
 
 /**
  * @brief 传输层初始化

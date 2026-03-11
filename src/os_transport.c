@@ -1,6 +1,7 @@
 #include "os_transport.h"
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <urma/urma_api.h>
 #ifdef URMA_OVER_UB
@@ -24,8 +25,18 @@ uint32_t os_transport_init(urma_context_t* urma_ctx, os_transport_cfg_t* ost_cfg
     g_ost_cfg = ost_cfg;
 
     // 初始化线程池
-    g_thread_pool = thread_pool_init(g_ost_cfg->worker_thread_num);
-    thread_pool_start(g_thread_pool);
+    // worker_queue_cap: 每个Worker的任务队列容量; pending_queue_cap: 0表示使用默认值1024
+    g_thread_pool = thread_pool_init(g_ost_cfg->worker_thread_num, 0);
+    if (!g_thread_pool) {
+        fprintf(stderr, "os_transport: 线程池初始化失败\n");
+        return -1;
+    }
+    if (thread_pool_start(g_thread_pool) != 0) {
+        fprintf(stderr, "os_transport: 线程池启动失败\n");
+        thread_pool_destroy(g_thread_pool);
+        g_thread_pool = NULL;
+        return -1;
+    }
 
     g_inited = 1;
 
@@ -85,10 +96,11 @@ send_task_arg_t* construct_send_task_arg(urma_write_info_t write_info, uint32_t 
     return arg;
 }
 
-worker_task_t* construct_worker_task(uint64_t task_id, void (*task_func)(void*),
+// 构建供worker取用的task信息
+ThreadPoolTask* construct_worker_task(uint64_t task_id, void (*task_func)(void*),
                                      send_task_arg_t* send_task_arg)
 {
-    worker_task_t* task = malloc(sizeof(worker_task_t));
+    ThreadPoolTask* task = malloc(sizeof(ThreadPoolTask));
     if (!task) {
         fprintf(stderr, "os_transport: 内存分配失败\n");
         return NULL;
@@ -121,7 +133,7 @@ uint32_t construct_and_register_worker_task(uint64_t task_num, task_type_t type,
                 // 这里可以根据实际情况选择返回一个错误的task或者直接退出
                 return -1;
             }
-            worker_task_t* task = construct_worker_task(i, task_func, task_arg);
+            ThreadPoolTask* task = construct_worker_task(i, task_func, task_arg);
             if (!task) {
                 fprintf(stderr, "os_transport: 任务构造失败\n");
                 // 这里可以根据实际情况选择返回一个错误的task或者直接退出
@@ -153,13 +165,15 @@ void send_task_worker_func(void* arg)
     do_send_chunk_for_worker(send_task_arg->write_info);
     // 如果是最后一个分片，则唤醒os_transport_send的线程继续执行
     if (!send_task_arg->is_last_chunk) {
+        free(send_task_arg);
         return;
     }
-    task_sync_t* sync = &send_task_arg->sync;
+    task_sync_t* sync = send_task_arg->sync;
     pthread_mutex_lock(&sync->mutex);
     sync->request_completed = 1;
     pthread_cond_signal(&sync->cond);
     pthread_mutex_unlock(&sync->mutex);
+    free(send_task_arg);
 }
 
 // 切分chunk的函数，负责将数据切分为多个chunk
@@ -167,7 +181,6 @@ void send_task_worker_func(void* arg)
 uint64_t split_chunks(struct buffer_info* local_src, struct buffer_info** retchunks)
 {
     size_t total_len = local_src[0].len;
-    size_t offset = 0;
     struct buffer_info* chunks;
     size_t chunks_num = (total_len + DEFAULT_CHUNK_SIZE - 1) / DEFAULT_CHUNK_SIZE;
     chunks = (struct buffer_info*)malloc(sizeof(struct buffer_info) * chunks_num);
@@ -228,6 +241,9 @@ uint32_t os_transport_send(void* handle, struct urma_jetty_info* jetty_info,
     // 将源地址中的数据拆分为多个chunk，每个chunk的大小不超过DEFAULT_CHUNK_SIZE
     struct buffer_info* chunks;
     uint64_t chunks_num = split_chunks(local_src, &chunks);
+    if (chunks_num == (uint64_t)-1) {
+        return -1;
+    }
 
     // 构造task并注册，注意最后一个chunk的task需要负责唤醒os_transport_send的线程继续执行
     task_sync_t* sync_handle;
@@ -239,23 +255,34 @@ uint32_t os_transport_send(void* handle, struct urma_jetty_info* jetty_info,
 
     wait_for_task_complete(sync_handle);
 
+    free(chunks);
+    pthread_mutex_destroy(&sync_handle->mutex);
+    pthread_cond_destroy(&sync_handle->cond);
+    free(sync_handle);
     return 0;
 }
 
-// worker线程执行的任务函数，负责发送chunk
+void do_recv_chunk_for_worker(h2d_info_t h2d_info)
+{
+    // 这里可以调用实际的H2D传输函数来接收数据
+}
+
+// worker线程执行的任务函数，负责接收chunk（H2D操作）
 void recv_task_worker_func(void* arg)
 {
     recv_task_arg_t* recv_task_arg = (recv_task_arg_t*)arg;
     do_recv_chunk_for_worker(recv_task_arg->h2d_info);
-    // 如果是最后一个分片，则唤醒os_transport_send的线程继续执行
+    // 如果是最后一个分片，则唤醒os_transport_recv的线程继续执行
     if (!recv_task_arg->is_last_chunk) {
+        free(recv_task_arg);
         return;
     }
-    task_sync_t* sync = &recv_task_arg->sync;
+    task_sync_t* sync = recv_task_arg->sync;
     pthread_mutex_lock(&sync->mutex);
     sync->request_completed = 1;
     pthread_cond_signal(&sync->cond);
     pthread_mutex_unlock(&sync->mutex);
+    free(recv_task_arg);
 }
 
 /*
@@ -266,18 +293,47 @@ void recv_task_worker_func(void* arg)
 uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
                            struct buffer_info* device_dst, uint32_t buffer_num, uint32_t client_key)
 {
+    if (!g_inited) {
+        fprintf(stderr, "os_transport: 未初始化\n");
+        return -1;
+    }
+    if (buffer_num != 1) {
+        fprintf(stderr, "os_transport: 目前仅支持1个buffer的接收\n");
+        return -1;
+    }
+
+    // 将host源数据拆分为多个chunk
+    struct buffer_info* chunks;
+    uint64_t chunks_num = split_chunks(host_src, &chunks);
+    if (chunks_num == (uint64_t)-1) {
+        return -1;
+    }
+
     // 构造recv类型的task并注册
     task_sync_t* sync_handle;
     construct_and_register_worker_task(chunks_num, RECV_TASK, recv_task_worker_func, &sync_handle);
     // 等待所有task完成后返回
     wait_for_task_complete(sync_handle);
 
+    free(chunks);
+    pthread_mutex_destroy(&sync_handle->mutex);
+    pthread_cond_destroy(&sync_handle->cond);
+    free(sync_handle);
     return 0;
 }
 
 uint32_t os_transport_destroy(void* handle)
 {
     if (!g_inited) return -1;
+
+    // 销毁线程池
+    if (g_thread_pool) {
+        thread_pool_destroy(g_thread_pool);
+        g_thread_pool = NULL;
+    }
+
+    g_urma_ctx = NULL;
+    g_ost_cfg = NULL;
     g_inited = 0;
     printf("os_transport: 资源销毁成功\n");
     return 0;
