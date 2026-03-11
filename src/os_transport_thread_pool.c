@@ -502,8 +502,8 @@ static void* worker_thread(void* arg) {
         }
         LOG_INFO("[WZY] break4:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         // 取出任务，设置为BUSY状态
-        task = worker_queue_pop(worker);
         worker->state = WORKER_STATE_BUSY;
+        task = worker_queue_pop(worker);
         LOG_INFO("[WZY] break5:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start9;", worker->worker_idx);
         pthread_mutex_unlock(&worker->mutex);
