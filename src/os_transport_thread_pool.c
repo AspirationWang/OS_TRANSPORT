@@ -49,25 +49,31 @@ static int worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
  * @brief Worker线程任务队列出队
  */
 static ThreadPoolTask* worker_queue_pop(WorkerThread* worker) {
-    LOG_DEBUG("[WZY] Enter into function worker_queue_pop");
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:1");
     if (!worker) {
+        LOG_DEBUG("[WZY] Enter into function worker_queue_pop:2");
         LOG_ERROR("worker_queue_pop invalid param");
         return NULL;
     }
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:3");
 
     pthread_mutex_lock(&worker->mutex);
     if (worker->queue_size == 0) {
+        LOG_DEBUG("[WZY] Enter into function worker_queue_pop:4");
         pthread_mutex_unlock(&worker->mutex);
         return NULL;
     }
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:5");
 
     ThreadPoolTask* task = worker->task_queue[worker->queue_head];
     worker->queue_head = (worker->queue_head + 1) % worker->queue_cap;
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:6");
     worker->queue_size--;
     LOG_DEBUG("worker[%d] pop task[%lu], queue size:%u", 
             worker->worker_idx, task->task_id, worker->queue_size);
-    
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:7");
     pthread_mutex_unlock(&worker->mutex);
+    LOG_DEBUG("[WZY] Enter into function worker_queue_pop:8");
     return task;
 }
 
