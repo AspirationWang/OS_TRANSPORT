@@ -21,16 +21,16 @@ typedef enum {
  */
 typedef struct {
     pthread_t tid;                  // 线程ID
-    WorkerState state;            // 线程状态
-    ThreadPoolTask* task_queue;   // 环形任务队列
+    pthread_mutex_t mutex;          // 线程锁
+    pthread_cond_t cond_task;       // 任务通知条件变量
+    WorkerState state;              // 线程状态（IDLE/BUSY/EXIT等）
+    int worker_idx;                 // 线程索引
+    ThreadPoolHandle pool;          // 所属线程池句柄
+    ThreadPoolTask** task_queue;    // 修正：ThreadPoolTask** 类型
     uint32_t queue_cap;             // 队列容量
     uint32_t queue_head;            // 队列头指针
     uint32_t queue_tail;            // 队列尾指针
-    uint32_t queue_size;            // 当前任务数
-    pthread_mutex_t mutex;          // 队列/状态锁
-    pthread_cond_t cond_task;       // 任务通知条件变量（唤醒Worker执行）
-    int worker_idx;                 // Worker索引
-    struct _ThreadPool* pool;     // 关联的线程池
+    uint32_t queue_size;            // 当前队列任务数
 } WorkerThread;
 
 /**
