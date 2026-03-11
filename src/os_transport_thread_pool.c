@@ -326,9 +326,9 @@ static void* async_poll_thread_func(void* arg) {
     LOG_INFO("AsyncPoll thread started");
 
     while (!pool->is_destroying) {
-        // ========== 第一步：优先处理外部通知（核心阻塞点） ==========
+        // ========== 第一步：优先处理外部通知 ==========
         pthread_mutex_lock(&pool->global_mutex);
-        // 无未处理通知 且 未销毁 → 阻塞等待（这是asyncPoll唯一的阻塞点）
+        // 无未处理通知且未销毁->阻塞等待，这是asyncPoll唯一的阻塞点
         while (!pool->has_notify && !pool->is_destroying) {
             LOG_INFO("AsyncPoll wait for external notify (task/submit/custom)");
             pthread_cond_wait(&pool->cond_interrupt, &pool->global_mutex);
@@ -340,50 +340,49 @@ static void* async_poll_thread_func(void* arg) {
             break;
         }
 
-        // 读取通知信息（不变）
-        uint32_t notify_type = pool->notify_type;
-        void* notify_data = pool->notify_data;
-        pool->has_notify = false;
-        pthread_mutex_unlock(&pool->global_mutex);
+        // 2. 循环处理队列中所有通知（直到队列为空）
+        while (pool->notify_queue_size > 0 && !pool->is_destroying) {
+            // 取出队头通知
+            NotifyItem item = pool->notify_queue[pool->notify_queue_head];
+            pool->notify_queue_head = (pool->notify_queue_head + 1) % pool->notify_queue_cap;
+            pool->notify_queue_size--;
+            LOG_INFO("[NOTIFY] Process notify (type=%d, data=%p, remaining=%d)", item.type, item.data, pool->notify_queue_size);
+            pthread_mutex_unlock(&pool->global_mutex);
 
-        // 处理任务提交通知（类型0，不变）
-        if (notify_type == 0) {
-            ThreadPoolTask* task = (ThreadPoolTask*)notify_data;
-            if (task == NULL) {
-                LOG_ERROR("AsyncPoll receive null task");
-                continue;
-            }
-            LOG_INFO("[NOTIFY] Process Notify: type=%d, data=%p", notify_type, notify_data);
-            LOG_INFO("[WZY] Start to do task:%lu.", task->task_id);
+            if (item.type == 0) {
+                ThreadPoolTask* task = (ThreadPoolTask*)item.data;
+                if (task == NULL) {
+                    LOG_ERROR("AsyncPoll receive null task");
+                    continue;
+                }
+                // 找最优Worker（不变）
+                int target_idx = find_best_worker(pool);
+                if (target_idx < 0) {
+                    LOG_WARN("No worker available, add task %lu to pending", task->task_id);
+                    pending_queue_push(&pool->pending_queue, task);
+                    continue;
+                }
+                WorkerThread* worker = &pool->workers[target_idx];
+                pthread_mutex_lock(&worker->mutex);
+                int ret = worker_queue_push(worker, task);
+                pthread_mutex_unlock(&worker->mutex);
 
-            // 找最优Worker（不变）
-            int target_idx = find_best_worker(pool);
-            if (target_idx < 0) {
-                LOG_WARN("No worker available, add task %lu to pending", task->task_id);
-                pending_queue_push(&pool->pending_queue, task);
-                continue;
-            }
-
-            WorkerThread* worker = &pool->workers[target_idx];
-            pthread_mutex_lock(&worker->mutex);
-            int ret = worker_queue_push(worker, task);
-            pthread_mutex_unlock(&worker->mutex);
-
-            if (ret == 0) {
-                pthread_cond_signal(&worker->cond_task);
-                LOG_INFO("AsyncPoll assign task %lu to Worker %d", task->task_id, target_idx);
-                free(task);
-                // 更新统计（不变）
-                pthread_mutex_lock(&pool->stats_mutex);
-                pool->running_tasks++;
-                pthread_mutex_unlock(&pool->stats_mutex);
+                if (ret == 0) {
+                    pthread_cond_signal(&worker->cond_task);
+                    LOG_INFO("AsyncPoll assign task %lu to Worker %d", task->task_id, target_idx);
+                    free(task);
+                    // 更新统计（不变）
+                    pthread_mutex_lock(&pool->stats_mutex);
+                    pool->running_tasks++;
+                    pthread_mutex_unlock(&pool->stats_mutex);
+                } else {
+                    LOG_WARN("Worker %d queue full, add task %lu to pending", target_idx, task->task_id);
+                    pending_queue_push(&pool->pending_queue, task);
+                }
             } else {
-                LOG_WARN("Worker %d queue full, add task %lu to pending", target_idx, task->task_id);
-                pending_queue_push(&pool->pending_queue, task);
+                // 处理自定义通知（不变）
+                LOG_INFO("AsyncPoll receive custom notify (type=%d, data=%p)", notify_type, notify_data);
             }
-        } else {
-            // 处理自定义通知（不变）
-            LOG_INFO("AsyncPoll receive custom notify (type=%d, data=%p)", notify_type, notify_data);
         }
 
         // ========== 第二步：非阻塞处理pending队列（有任务就处理，无任务就跳过） ==========
@@ -498,6 +497,18 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
         return NULL;
     }
 
+    // 初始化通知队列（初始容量1024，可扩容）
+    pool->notify_queue_cap = 1024;
+    pool->notify_queue = (NotifyItem*)calloc(pool->notify_queue_cap, sizeof(NotifyItem));
+    if (pool->notify_queue == NULL) {
+        LOG_ERROR("Notify queue malloc failed");
+        os_thread_pool_destroy(pool);
+        return NULL;
+    }
+    pool->notify_queue_head = 0;
+    pool->notify_queue_tail = 0;
+    pool->notify_queue_size = 0;
+
     pool->is_initialized = true;
     pool->is_running = false;
     pool->is_destroying = false;
@@ -524,6 +535,35 @@ int thread_pool_start(ThreadPoolHandle handle) {
     pthread_mutex_unlock(&handle->global_mutex);
 
     LOG_INFO("ThreadPool start success");
+    return 0;
+}
+
+// 通知队列入队函数
+static int notify_queue_push(struct _OSThreadPool* pool, uint32_t type, void* data) {
+    if (pool == NULL || data == NULL) return -1;
+
+    // 队列满则扩容（翻倍）
+    if (pool->notify_queue_size >= pool->notify_queue_cap) {
+        uint32_t new_cap = pool->notify_queue_cap * 2;
+        NotifyItem* new_queue = (NotifyItem*)calloc(new_cap, sizeof(NotifyItem));
+        if (new_queue == NULL) return -1;
+        // 拷贝旧队列数据
+        for (uint32_t i = 0; i < pool->notify_queue_size; i++) {
+            uint32_t old_idx = (pool->notify_queue_head + i) % pool->notify_queue_cap;
+            new_queue[i] = pool->notify_queue[old_idx];
+        }
+        free(pool->notify_queue);
+        pool->notify_queue = new_queue;
+        pool->notify_queue_cap = new_cap;
+        pool->notify_queue_head = 0;
+        pool->notify_queue_tail = pool->notify_queue_size;
+    }
+
+    // 通知入队
+    pool->notify_queue[pool->notify_queue_tail].type = type;
+    pool->notify_queue[pool->notify_queue_tail].data = data;
+    pool->notify_queue_tail = (pool->notify_queue_tail + 1) % pool->notify_queue_cap;
+    pool->notify_queue_size++;
     return 0;
 }
 
@@ -563,11 +603,19 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
 
     // 触发AsyncPoll中断
     pthread_mutex_lock(&handle->global_mutex);
-    LOG_INFO("[NOTIFY] Submit Task %lu: notify_data=%p (old=%p)", task_id, task, handle->notify_data); // 打印新旧地址
-    handle->notify_type = 0;
-    handle->notify_data = task;
-    handle->has_notify = true;
-    pthread_cond_signal(&handle->cond_interrupt);
+    // 通知入队（替代覆盖单变量）
+    int ret = notify_queue_push(handle, 0, task);
+    if (ret == 0) {
+        LOG_INFO("[NOTIFY] Task %lu added to notify queue (size=%d)", 
+                 task_id, handle->notify_queue_size);
+        handle->has_notify = true; // 标记有通知
+        pthread_cond_signal(&handle->cond_interrupt); // 唤醒asyncPoll
+    } else {
+        LOG_ERROR("[NOTIFY] Task %lu push to notify queue failed", task_id);
+        free(task); // 入队失败，释放任务
+        pthread_mutex_unlock(&handle->global_mutex);
+        return 0;
+    }
     pthread_mutex_unlock(&handle->global_mutex);
 
     LOG_INFO("Submit task %lu success", task_id);
@@ -641,6 +689,15 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
         pthread_mutex_destroy(&worker->mutex);
         pthread_cond_destroy(&worker->cond_task);
     }
+
+    // 销毁通知队列（释放未处理的通知数据）
+    pthread_mutex_lock(&handle->global_mutex);
+    for (uint32_t i = 0; i < handle->notify_queue_size; i++) {
+        uint32_t idx = (handle->notify_queue_head + i) % handle->notify_queue_cap;
+        free(handle->notify_queue[idx].data); // 释放任务指针
+    }
+    free(handle->notify_queue);
+    pthread_mutex_unlock(&handle->global_mutex);
 
     // 释放全局资源
     pthread_mutex_destroy(&handle->global_mutex);

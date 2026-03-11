@@ -47,6 +47,11 @@ typedef struct {
     bool is_destroying;             // 销毁标记
 } PendingTaskQueue;
 
+typedef struct {
+    uint32_t type;
+    void* data;
+} NotifyItem; // 通知项（类型+数据）
+
 /**
  * @brief 线程池内部结构
  */
@@ -83,6 +88,12 @@ struct _ThreadPool {
 
     // 全局Pending队列
     PendingTaskQueue pending_queue;
+
+    NotifyItem* notify_queue;  // 通知队列数组
+    uint32_t notify_queue_cap;   // 队列容量
+    uint32_t notify_queue_head;  // 队列头（取通知）
+    uint32_t notify_queue_tail;  // 队列尾（存通知）
+    uint32_t notify_queue_size;  // 队列当前通知数
 };
 
 #endif // OS_THREAD_POOL_INTERNAL_H
