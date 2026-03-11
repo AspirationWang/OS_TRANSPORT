@@ -12,7 +12,7 @@ void test_task(void* arg) {
 
 // 任务完成回调
 void task_complete_cb(uint64_t task_id, bool success, void* user_data) {
-    printf("Task %lu completed: %s\n", task_id, success ? "success" : "failed");
+    printf("Task %lu user_data %p completed: %s\n", task_id, user_data, success ? "success" : "failed");
 }
 
 int main() {
