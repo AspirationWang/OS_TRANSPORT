@@ -1,5 +1,7 @@
 #include "os_transport_thread_pool.h"
 #include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
 
 // 示例任务函数
 void test_task(void* arg) {
