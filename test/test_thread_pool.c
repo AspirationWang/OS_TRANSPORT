@@ -49,7 +49,7 @@ static void test_state_wait_completion(void) {
 // 任务完成回调
 static void task_complete_cb(uint64_t task_id, bool success, void* user_data) {
     // user_data 可以传递任务序号等信息，这里我们简单打印
-    printf("Callback: task %lu completed, success=%d\n", task_id, success);
+    printf("Callback: task %lu completed, success=%d, data = %p.\n", task_id, success, user_data);
     pthread_mutex_lock(&g_state.lock);
     g_state.completed_count++;
     pthread_cond_signal(&g_state.cond);

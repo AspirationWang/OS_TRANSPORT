@@ -214,7 +214,7 @@ static void* worker_routine(void* arg) {
 }
 
 // 创建并启动 worker 线程（如果未创建）
-static bool ensure_worker_running(ThreadPoolHandle pool, WorkerThread* worker) {
+static bool ensure_worker_running(WorkerThread* worker) {
     if (worker->tid == 0) {
         pthread_mutex_lock(&worker->mutex);
         if (worker->tid == 0) {
@@ -285,7 +285,7 @@ static void* async_poll_routine(void* arg) {
 
             pthread_mutex_lock(&worker->mutex);
             // 确保 worker 线程已运行
-            if (!ensure_worker_running(pool, worker)) {
+            if (!ensure_worker_running(worker)) {
                 // 创建失败，放回任务
                 pthread_mutex_unlock(&worker->mutex);
                 pending_queue_push(pool, task);
@@ -487,7 +487,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
 
     // 确保 worker 已运行
     pthread_mutex_lock(&target_worker->mutex);
-    if (!ensure_worker_running(handle, target_worker)) {
+    if (!ensure_worker_running(target_worker)) {
         pthread_mutex_unlock(&target_worker->mutex);
         free(task_ids);
         return NULL;
