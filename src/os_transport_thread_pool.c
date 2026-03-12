@@ -27,13 +27,12 @@ static int worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
         return -1;
     }
 
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start1;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 1", worker->worker_idx, (unsigned long)pthread_self());
     pthread_mutex_lock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End1;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 1", worker->worker_idx, (unsigned long)pthread_self());
     if (worker->queue_size >= worker->queue_cap) {
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start1;", worker->worker_idx);
         pthread_mutex_unlock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end1;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 1", worker->worker_idx, (unsigned long)pthread_self());
         LOG_WARN("worker[%d] queue full (cap:%u, size:%u)", 
                 worker->worker_idx, worker->queue_cap, worker->queue_size);
         return -1;
@@ -44,10 +43,8 @@ static int worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
     worker->queue_size++;
     LOG_DEBUG("worker[%d] push task[%lu], queue size:%u", 
             worker->worker_idx, task->task_id, worker->queue_size);
-    
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start2;", worker->worker_idx);
-            pthread_mutex_unlock(&worker->mutex);
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end2;", worker->worker_idx);
+    pthread_mutex_unlock(&worker->mutex);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 2", worker->worker_idx, (unsigned long)pthread_self());
     return 0;
 }
 
@@ -62,14 +59,13 @@ static ThreadPoolTask* worker_queue_pop(WorkerThread* worker) {
         return NULL;
     }
     LOG_DEBUG("[WZY] Enter into function worker_queue_pop:3");
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start2;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 2", worker->worker_idx, (unsigned long)pthread_self());
     pthread_mutex_lock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End2;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 2", worker->worker_idx, (unsigned long)pthread_self());
     if (worker->queue_size == 0) {
         LOG_DEBUG("[WZY] Enter into function worker_queue_pop:4");
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start3;", worker->worker_idx);
         pthread_mutex_unlock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end3;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 3", worker->worker_idx, (unsigned long)pthread_self());
         return NULL;
     }
     LOG_DEBUG("[WZY] Enter into function worker_queue_pop:5");
@@ -81,9 +77,8 @@ static ThreadPoolTask* worker_queue_pop(WorkerThread* worker) {
     LOG_DEBUG("worker[%d] pop task[%lu], queue size:%u", 
             worker->worker_idx, task->task_id, worker->queue_size);
     LOG_DEBUG("[WZY] Enter into function worker_queue_pop:7");
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start4;", worker->worker_idx);
     pthread_mutex_unlock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end4;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 4", worker->worker_idx, (unsigned long)pthread_self());
     LOG_DEBUG("[WZY] Enter into function worker_queue_pop:8");
     return task;
 }
@@ -264,13 +259,12 @@ static int select_best_worker(ThreadPoolHandle handle) {
 
         // 非批量任务：选队列最小的；批量任务：需遍历所有找最小
         if (!found_idle) {
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start3;", worker->worker_idx);
-        pthread_mutex_lock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End3;", worker->worker_idx);
+            LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 3", worker->worker_idx, (unsigned long)pthread_self());
+            pthread_mutex_lock(&worker->mutex);
+            LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 3", worker->worker_idx, (unsigned long)pthread_self());
             uint32_t queue_size = worker->queue_size;
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start5;", worker->worker_idx);
             pthread_mutex_unlock(&worker->mutex);
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end5;", worker->worker_idx);
+            LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 5", worker->worker_idx, (unsigned long)pthread_self());
             
             if (queue_size < min_queue_size) {
                 min_queue_size = queue_size;
@@ -325,13 +319,12 @@ static void worker_process_pending(ThreadPoolHandle handle, WorkerThread* worker
     }
 
     // 仅当worker队列有空闲时拉取pending任务
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start4;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 4", worker->worker_idx, (unsigned long)pthread_self());
     pthread_mutex_lock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End4;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 4", worker->worker_idx, (unsigned long)pthread_self());
     bool has_space = (worker->queue_size < worker->queue_cap);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start6;", worker->worker_idx);
     pthread_mutex_unlock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end6;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 6", worker->worker_idx, (unsigned long)pthread_self());
 
     if (!has_space) {
         return;
@@ -467,13 +460,12 @@ static void* worker_thread(void* arg) {
     pthread_mutex_unlock(&handle->start_mutex);
 
     // 设置初始状态为IDLE
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start5;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 5", worker->worker_idx, (unsigned long)pthread_self());
     pthread_mutex_lock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End5;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 5", worker->worker_idx, (unsigned long)pthread_self());
     worker->state = WORKER_STATE_IDLE;
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start7;", worker->worker_idx);
     pthread_mutex_unlock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end7;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 7", worker->worker_idx, (unsigned long)pthread_self());
 
     LOG_INFO("worker[%d] thread start (tid:%lu, state:IDLE)", 
             worker->worker_idx, (unsigned long)pthread_self());
@@ -484,9 +476,9 @@ static void* worker_thread(void* arg) {
         ThreadPoolTask* task = NULL;
 
         // 等待任务通知
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start6;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 6", worker->worker_idx, (unsigned long)pthread_self());
         pthread_mutex_lock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End6;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 6", worker->worker_idx, (unsigned long)pthread_self());
         LOG_INFO("[WZY] break2:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         while (worker->queue_size == 0 && !handle->is_destroying && worker->state != WORKER_STATE_EXIT) {
             worker->state = WORKER_STATE_IDLE;
@@ -495,19 +487,17 @@ static void* worker_thread(void* arg) {
         LOG_INFO("[WZY] break3:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         // 检查退出条件
         if (handle->is_destroying || worker->state == WORKER_STATE_EXIT) {
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start8;", worker->worker_idx);
             pthread_mutex_unlock(&worker->mutex);
-            LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end8;", worker->worker_idx);
+            LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 8", worker->worker_idx, (unsigned long)pthread_self());
             break;
         }
         LOG_INFO("[WZY] break4:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
         // 取出任务，设置为BUSY状态
-        worker->state = WORKER_STATE_BUSY;
         task = worker_queue_pop(worker);
+        worker->state = WORKER_STATE_BUSY;
         LOG_INFO("[WZY] break5:worker[%d] thread init (tid:%lu, state:INIT)", worker->worker_idx, (unsigned long)pthread_self());
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start9;", worker->worker_idx);
         pthread_mutex_unlock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end9;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 9", worker->worker_idx, (unsigned long)pthread_self());
 
         // 执行任务
         if (task) {
@@ -533,23 +523,21 @@ static void* worker_thread(void* arg) {
         }
 
         // 重置为IDLE状态
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start7;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 7", worker->worker_idx, (unsigned long)pthread_self());
         pthread_mutex_lock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End7;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 7", worker->worker_idx, (unsigned long)pthread_self());
         worker->state = WORKER_STATE_IDLE;
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start10;", worker->worker_idx);
         pthread_mutex_unlock(&worker->mutex);
-        LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end10;", worker->worker_idx);
+        LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 10", worker->worker_idx, (unsigned long)pthread_self());
     }
 
     // 退出清理
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX Start8;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d lock attempt, tid: %lu 8", worker->worker_idx, (unsigned long)pthread_self());
     pthread_mutex_lock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Add MUTEX End8;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d hold mutex, tid: %lu 8", worker->worker_idx, (unsigned long)pthread_self());
     worker->state = WORKER_STATE_EXIT;
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX Start11;", worker->worker_idx);
     pthread_mutex_unlock(&worker->mutex);
-    LOG_DEBUG("[WZY][MUTEX] WorkId = %d, Del MUTEX end12;", worker->worker_idx);
+    LOG_DEBUG("[WZY][MUTEX] Worker %d release mutex, tid: %lu 11", worker->worker_idx, (unsigned long)pthread_self());
     LOG_INFO("worker[%d] thread exit (tid:%lu, state:EXIT)", 
             worker->worker_idx, (unsigned long)pthread_self());
 
