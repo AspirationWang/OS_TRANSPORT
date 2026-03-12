@@ -38,23 +38,19 @@ static uint64_t generate_task_id(ThreadPoolHandle pool) {
 
 // 扩展 pending 队列容量
 static bool pending_queue_expand(PendingTaskQueue* q, uint32_t new_cap) {
-    ThreadPoolTask** new_tasks = realloc(q->tasks, new_cap * sizeof(ThreadPoolTask*));
+    ThreadPoolTask** new_tasks = malloc(new_cap * sizeof(ThreadPoolTask*));
     if (!new_tasks) return false;
-    // 重新排列为线性顺序
+
     uint32_t count = q->size;
-    ThreadPoolTask** old = q->tasks;
     for (uint32_t i = 0; i < count; i++) {
-        new_tasks[i] = old[(q->head + i) % q->cap];
+        new_tasks[i] = q->tasks[(q->head + i) % q->cap];
     }
+
+    free(q->tasks);
+    q->tasks = new_tasks;
     q->head = 0;
     q->tail = count;
     q->cap = new_cap;
-    q->tasks = new_tasks;
-    free(old);  // 注意：old 就是原来的 q->tasks，但 realloc 可能已释放，不能 free(old) 两次
-    // 实际上 realloc 会处理，但为了清晰，我们采用重新分配的方式
-    // 上面逻辑中 new_tasks 可能等于 old，free(old) 会出错，应避免
-    // 正确做法：如果 new_tasks != old，则 free(old) 应由 realloc 内部处理，我们不需要手动 free
-    // 此处简化：假设 realloc 成功，我们直接使用 new_tasks，不需要 free old
     return true;
 }
 
