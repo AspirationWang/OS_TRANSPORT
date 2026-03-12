@@ -82,25 +82,38 @@ static ThreadPoolTask* pending_queue_pop(ThreadPoolHandle pool) {
 
 // 扩展 worker 队列
 static bool worker_queue_expand(WorkerThread* worker, uint32_t new_cap) {
-    ThreadPoolTask** new_q = realloc(worker->task_queue, new_cap * sizeof(ThreadPoolTask*));
-    if (!new_q) return false;
-    // 重新排列为线性顺序
-    uint32_t count = worker->queue_size;
-    ThreadPoolTask** old = worker->task_queue;
-    for (uint32_t i = 0; i < count; i++) {
-        new_q[i] = old[(worker->queue_head + i) % worker->queue_cap];
+    LOG_DEBUG("Worker %d expanding queue from %u to %u, current size=%u, head=%u, tail=%u",
+              worker->worker_idx, worker->queue_cap, new_cap, worker->queue_size,
+              worker->queue_head, worker->queue_tail);
+    ThreadPoolTask** new_q = malloc(new_cap * sizeof(ThreadPoolTask*));
+    if (!new_q) {
+        LOG_ERROR("Worker %d malloc for new queue failed", worker->worker_idx);
+        return false;
     }
+
+    uint32_t count = worker->queue_size;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t idx = (worker->queue_head + i) % worker->queue_cap;
+        new_q[i] = worker->task_queue[idx];
+        LOG_DEBUG("  copy task %p from idx %u to new[%u]", worker->task_queue[idx], idx, i);
+    }
+
+    free(worker->task_queue);
+    worker->task_queue = new_q;
     worker->queue_head = 0;
     worker->queue_tail = count;
     worker->queue_cap = new_cap;
-    worker->task_queue = new_q;
-    // 注意：old 可能被 realloc 释放，无需手动 free
+    LOG_DEBUG("Worker %d expand done, new head=0, tail=%u, cap=%u", worker->worker_idx, count, new_cap);
     return true;
 }
 
 // 向 worker 队列添加任务（必须已持有 worker->mutex）
 static bool worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
+    LOG_DEBUG("Worker %d push task %p, current size=%u, cap=%u, head=%u, tail=%u",
+              worker->worker_idx, task, worker->queue_size, worker->queue_cap,
+              worker->queue_head, worker->queue_tail);
     if (worker->queue_size >= worker->queue_cap) {
+        LOG_DEBUG("Worker %d queue full, need expand", worker->worker_idx);
         uint32_t new_cap = worker->queue_cap * 2;
         if (!worker_queue_expand(worker, new_cap)) {
             LOG_ERROR("Worker %d expand queue failed", worker->worker_idx);
@@ -108,8 +121,10 @@ static bool worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
         }
     }
     worker->task_queue[worker->queue_tail] = task;
+    LOG_DEBUG("Worker %d placed task at tail=%u", worker->worker_idx, worker->queue_tail);
     worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
     worker->queue_size++;
+    LOG_DEBUG("Worker %d push done, new size=%u, tail=%u", worker->worker_idx, worker->queue_size, worker->queue_tail);
     return true;
 }
 
@@ -468,15 +483,21 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
 
 // 批量提交任务（保证顺序）
 uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
-                                         ThreadPoolTask* tasks,
-                                         uint32_t task_count,
-                                         TaskCompleteCb complete_cb,
-                                         void* user_data) {
-    if (!handle || !tasks || task_count == 0 || !handle->is_running) return NULL;
+    ThreadPoolTask* tasks,
+    uint32_t task_count,
+    TaskCompleteCb complete_cb,
+    void* user_data) {
+    LOG_DEBUG("Enter submit_batch_tasks, task_count=%u", task_count);
+    if (!handle || !tasks || task_count == 0 || !handle->is_running) {
+        LOG_ERROR("submit_batch_tasks invalid params");
+        return NULL;
+    }
 
-    // 为每个任务创建内部包装和 ThreadPoolTask
     uint64_t* task_ids = malloc(task_count * sizeof(uint64_t));
-    if (!task_ids) return NULL;
+    if (!task_ids) {
+        LOG_ERROR("submit_batch_tasks malloc task_ids failed");
+        return NULL;
+    }
 
     // 先选择同一个 worker
     WorkerThread* target_worker = select_best_worker(handle);
@@ -485,14 +506,18 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         free(task_ids);
         return NULL;
     }
+    LOG_DEBUG("Selected worker %d for batch", target_worker->worker_idx);
 
     pthread_mutex_lock(&target_worker->mutex);
+    LOG_DEBUG("Locked worker %d mutex", target_worker->worker_idx);
 
-    // 批量构造任务并尝试放入 worker 队列
     bool success = true;
-    for (uint32_t i = 0; i < task_count; i++) {
+    uint32_t i;
+    for (i = 0; i < task_count; i++) {
+        LOG_DEBUG("Processing batch task %u/%u", i+1, task_count);
         InternalTask* itask = malloc(sizeof(InternalTask));
         if (!itask) {
+            LOG_ERROR("malloc itask failed at i=%u", i);
             success = false;
             break;
         }
@@ -504,6 +529,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
 
         ThreadPoolTask* task = malloc(sizeof(ThreadPoolTask));
         if (!task) {
+            LOG_ERROR("malloc task failed at i=%u", i);
             free(itask);
             success = false;
             break;
@@ -514,9 +540,11 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         task->is_completed = false;
         itask->task_id = task->task_id;
         task_ids[i] = task->task_id;
+        LOG_DEBUG("Created task id=%lu, internal task=%p", task->task_id, itask);
 
         // 直接放入 target_worker 队列
         if (!worker_queue_push(target_worker, task)) {
+            LOG_ERROR("worker_queue_push failed at i=%u", i);
             free(task);
             free(itask);
             success = false;
@@ -525,16 +553,16 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
     }
 
     if (!success) {
-        // 清理已分配的任务
+        LOG_ERROR("Batch submission failed at task %u, cleaning up", i);
+        // 注意：已经放入 worker 队列的任务无法撤回，但会继续执行
         pthread_mutex_unlock(&target_worker->mutex);
-        // 注意：已经放入 worker 队列的任务无法轻易撤回，这里简化处理：继续执行，但返回 NULL
-        // 实际应该回滚，但较复杂，为简化，假设成功
         free(task_ids);
         return NULL;
     }
 
     // 通知 worker 有任务
     pthread_cond_signal(&target_worker->cond_task);
+    LOG_DEBUG("Signaled worker %d", target_worker->worker_idx);
     pthread_mutex_unlock(&target_worker->mutex);
 
     LOG_DEBUG("Batch of %u tasks submitted to worker %d", task_count, target_worker->worker_idx);
