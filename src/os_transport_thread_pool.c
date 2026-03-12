@@ -196,7 +196,7 @@ static void* worker_routine(void* arg) {
             pool->completed_tasks++;
             pthread_mutex_unlock(&pool->stats_mutex);
 
-            // 释放任务结构（注意：task_arg 是 InternalTask，已在包装函数中释放）
+            // 释放任务结构, task_arg 是 InternalTask，已在包装函数中释放
             free(task);
 
             pthread_mutex_lock(&worker->mutex);

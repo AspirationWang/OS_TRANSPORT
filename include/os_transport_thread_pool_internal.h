@@ -55,6 +55,15 @@ typedef struct {
     void* data;
 } NotifyItem; // 通知项（类型+数据）
 
+
+/**
+ * @brief urma相关信息，用于与asyncPool线程绑定
+ */
+typedef struct {
+    urma_jfce_t *jfce;
+    urma_jfc_t *jfc;
+} ThreadPoolUrmaInfo;
+
 /**
  * @brief 线程池内部结构
  */
@@ -101,6 +110,8 @@ struct _ThreadPool {
     uint32_t notify_queue_head;  // 队列头（取通知）
     uint32_t notify_queue_tail;  // 队列尾（存通知）
     uint32_t notify_queue_size;  // 队列当前通知数
+
+    ThreadPoolUrmaInfo urmaInfo;
 };
 
 // 日志级别
