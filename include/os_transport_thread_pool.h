@@ -58,6 +58,21 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                  void* user_data);
 
 /**
+ * @brief 批量提交任务（所有任务入同一个worker线程，保证执行顺序）
+ * @param handle 线程池句柄
+ * @param tasks 任务数组（用户需分配，每个任务的task_func必须有效）
+ * @param task_count 任务数量
+ * @param complete_cb 任务完成回调
+ * @param user_data 回调透传数据
+ * @return 任务ID数组（长度=task_count，NULL=失败，用户需自行释放）
+ */
+uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
+                                         ThreadPoolTask* tasks,
+                                         uint32_t task_count,
+                                         TaskCompleteCb complete_cb,
+                                         void* user_data);
+
+/**
  * @brief 通用通知asyncPoll接口（支持自定义事件）
  * @param handle 线程池句柄
  * @param notify_type 通知类型（0=任务提交，1+=自定义事件）

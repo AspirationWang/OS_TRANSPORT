@@ -5,6 +5,9 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
+#include <time.h>
+#include <stdarg.h>
 
 /**
  * @brief Worker线程状态枚举
@@ -21,16 +24,16 @@ typedef enum {
  */
 typedef struct {
     pthread_t tid;                  // 线程ID
-    WorkerState state;            // 线程状态
-    ThreadPoolTask* task_queue;   // 环形任务队列
+    pthread_mutex_t mutex;          // 线程锁
+    pthread_cond_t cond_task;       // 任务通知条件变量
+    WorkerState state;              // 线程状态（IDLE/BUSY/EXIT等）
+    int worker_idx;                 // 线程索引
+    ThreadPoolHandle pool;          // 所属线程池句柄
+    ThreadPoolTask** task_queue;    // 修正：ThreadPoolTask** 类型
     uint32_t queue_cap;             // 队列容量
     uint32_t queue_head;            // 队列头指针
     uint32_t queue_tail;            // 队列尾指针
-    uint32_t queue_size;            // 当前任务数
-    pthread_mutex_t mutex;          // 队列/状态锁
-    pthread_cond_t cond_task;       // 任务通知条件变量（唤醒Worker执行）
-    int worker_idx;                 // Worker索引
-    struct _ThreadPool* pool;     // 关联的线程池
+    uint32_t queue_size;            // 当前队列任务数
 } WorkerThread;
 
 /**
@@ -46,6 +49,11 @@ typedef struct {
     pthread_cond_t cond_has_task;   // 有任务通知条件
     bool is_destroying;             // 销毁标记
 } PendingTaskQueue;
+
+typedef struct {
+    uint32_t type;
+    void* data;
+} NotifyItem; // 通知项（类型+数据）
 
 /**
  * @brief 线程池内部结构
@@ -81,8 +89,61 @@ struct _ThreadPool {
     uint32_t completed_tasks;       // 已完成任务数
     pthread_mutex_t stats_mutex;    // 统计锁
 
+    pthread_cond_t cond_start;       // 线程启动信号
+    pthread_mutex_t start_mutex;     // 启动控制锁
+    bool is_started;                 // 线程池是否已启动
+
     // 全局Pending队列
     PendingTaskQueue pending_queue;
+
+    NotifyItem* notify_queue;  // 通知队列数组
+    uint32_t notify_queue_cap;   // 队列容量
+    uint32_t notify_queue_head;  // 队列头（取通知）
+    uint32_t notify_queue_tail;  // 队列尾（存通知）
+    uint32_t notify_queue_size;  // 队列当前通知数
 };
+
+// 日志级别
+typedef enum {
+    LOG_LEVEL_DEBUG = 0,
+    LOG_LEVEL_INFO,
+    LOG_LEVEL_WARN,
+    LOG_LEVEL_ERROR
+} LogLevel;
+
+// 全局日志级别控制（可通过编译宏/配置修改）
+#ifndef GLOBAL_LOG_LEVEL
+#define GLOBAL_LOG_LEVEL LOG_LEVEL_DEBUG
+#endif
+
+// 获取当前时间字符串
+static inline const char* get_log_time() {
+    static char time_buf[32];
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
+    return time_buf;
+}
+
+// 日志格式化输出宏
+#define LOG(level, fmt, ...) do { \
+    if (level >= GLOBAL_LOG_LEVEL) { \
+        const char* level_str = NULL; \
+        switch(level) { \
+            case LOG_LEVEL_DEBUG: level_str = "DEBUG"; break; \
+            case LOG_LEVEL_INFO:  level_str = "INFO";  break; \
+            case LOG_LEVEL_WARN:  level_str = "WARN";  break; \
+            case LOG_LEVEL_ERROR: level_str = "ERROR"; break; \
+        } \
+        fprintf(stderr, "[%s][%s][%s:%d] " fmt "\n", \
+            get_log_time(), level_str, __FILE__, __LINE__, ##__VA_ARGS__); \
+    } \
+} while(0)
+
+// 快捷日志宏
+#define LOG_DEBUG(fmt, ...) LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  LOG(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
+#define LOG_WARN(fmt, ...)  LOG(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
 
 #endif // OS_THREAD_POOL_INTERNAL_H
