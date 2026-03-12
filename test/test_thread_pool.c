@@ -1,4 +1,4 @@
-// test_thread_pool.c
+// test_thread_pool.c (修正版)
 #include "os_transport_thread_pool.h"
 #include "os_transport_thread_pool_internal.h"
 #include <stdio.h>
@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
+#include <string.h>
 
 // 测试全局状态
 typedef struct {
@@ -17,14 +18,25 @@ typedef struct {
     int task_counter;          // 用于生成任务序号
     int* execution_order;       // 记录每个任务执行的序号（按完成顺序）
     pthread_t* thread_ids;       // 记录每个任务执行的线程ID
+    int write_pos;               // 当前写入位置（在锁保护下使用）
     int notify_received[10];     // 记录接收到的通知类型
     int notify_count;
 } TestState;
 
 static TestState g_state;
 
-// 初始化测试状态
+// 初始化测试状态（每次测试前调用）
 static void test_state_init(int total) {
+    // 释放之前可能分配的内存
+    if (g_state.execution_order) {
+        free(g_state.execution_order);
+        g_state.execution_order = NULL;
+    }
+    if (g_state.thread_ids) {
+        free(g_state.thread_ids);
+        g_state.thread_ids = NULL;
+    }
+
     pthread_mutex_init(&g_state.lock, NULL);
     pthread_cond_init(&g_state.cond, NULL);
     g_state.completed_count = 0;
@@ -33,8 +45,9 @@ static void test_state_init(int total) {
     g_state.task_counter = 0;
     g_state.execution_order = calloc(total, sizeof(int));
     g_state.thread_ids = calloc(total, sizeof(pthread_t));
+    g_state.write_pos = 0;  // 重置写入位置
     g_state.notify_count = 0;
-    for (int i = 0; i < 10; i++) g_state.notify_received[i] = 0;
+    memset(g_state.notify_received, 0, sizeof(g_state.notify_received));
 }
 
 // 等待所有任务完成
@@ -48,8 +61,7 @@ static void test_state_wait_completion(void) {
 
 // 任务完成回调
 static void task_complete_cb(uint64_t task_id, bool success, void* user_data) {
-    // user_data 可以传递任务序号等信息，这里我们简单打印
-    printf("Callback: task %lu completed, success=%d, data = %p.\n", task_id, success, user_data);
+    printf("Callback: task %lu completed, success=%d\n", task_id, success);
     pthread_mutex_lock(&g_state.lock);
     g_state.completed_count++;
     pthread_cond_signal(&g_state.cond);
@@ -63,13 +75,15 @@ static void sample_task(void* arg) {
     pthread_t self = pthread_self();
 
     pthread_mutex_lock(&g_state.lock);
-    // 记录执行顺序：当前完成的序号（从0开始）
-    int idx = g_state.completed_count;  // 注意：这里记录的是在任务内部的顺序，但任务可能并发执行，所以不能直接依赖completed_count
-    // 我们改用更可靠的方式：在任务函数中直接记录序号和线程ID到数组，用原子递增的写入位置
-    static int write_pos = 0;  // 静态变量，但需要锁保护
-    g_state.execution_order[write_pos] = seq;
-    g_state.thread_ids[write_pos] = self;
-    write_pos++;
+    int pos = g_state.write_pos;
+    // 确保不越界（理论上不会，但加保护）
+    if (pos < g_state.total_tasks) {
+        g_state.execution_order[pos] = seq;
+        g_state.thread_ids[pos] = self;
+        g_state.write_pos++;
+    } else {
+        fprintf(stderr, "Error: write_pos %d exceeded total_tasks %d\n", pos, g_state.total_tasks);
+    }
     pthread_mutex_unlock(&g_state.lock);
 
     printf("Task %d (seq %d) executed by thread %lu\n", seq, seq, (unsigned long)self);
@@ -83,10 +97,12 @@ static void batch_task(void* arg) {
     pthread_t self = pthread_self();
 
     pthread_mutex_lock(&g_state.lock);
-    static int batch_write_pos = 0;
-    g_state.execution_order[batch_write_pos] = seq;
-    g_state.thread_ids[batch_write_pos] = self;
-    batch_write_pos++;
+    int pos = g_state.write_pos;
+    if (pos < g_state.total_tasks) {
+        g_state.execution_order[pos] = seq;
+        g_state.thread_ids[pos] = self;
+        g_state.write_pos++;
+    }
     pthread_mutex_unlock(&g_state.lock);
 
     printf("Batch task %d executed by thread %lu\n", seq, (unsigned long)self);
@@ -102,7 +118,6 @@ static void test_single_task(ThreadPoolHandle pool) {
     uint64_t task_id = thread_pool_submit_task(pool, sample_task, arg, task_complete_cb, NULL);
     assert(task_id != 0);
     printf("Submitted single task, id=%lu\n", task_id);
-    // 等待完成
     test_state_wait_completion();
     printf("Single task done.\n");
 }
@@ -114,17 +129,14 @@ static void test_batch_tasks(ThreadPoolHandle pool) {
     ThreadPoolTask tasks[BATCH_COUNT];
     int* args[BATCH_COUNT];
 
-    // 准备任务数组，每个任务有唯一的参数（序号）
     for (int i = 0; i < BATCH_COUNT; i++) {
         args[i] = malloc(sizeof(int));
-        *args[i] = i;  // 序号
-        tasks[i].task_id = 0; // 填充，实际不用
+        *args[i] = i;
         tasks[i].task_func = batch_task;
         tasks[i].task_arg = args[i];
-        tasks[i].is_completed = false;
+        // task_id 和 is_completed 由内部填充，无需设置
     }
 
-    // 提交批量任务
     uint64_t* task_ids = thread_pool_submit_batch_tasks(pool, tasks, BATCH_COUNT, task_complete_cb, NULL);
     assert(task_ids != NULL);
 
@@ -134,25 +146,24 @@ static void test_batch_tasks(ThreadPoolHandle pool) {
     }
     printf("\n");
 
-    // 等待完成
     test_state_wait_completion();
 
     // 验证执行顺序：所有任务应该在同一线程中按序号递增执行
     pthread_t first_thread = g_state.thread_ids[0];
     for (int i = 0; i < BATCH_COUNT; i++) {
         assert(pthread_equal(g_state.thread_ids[i], first_thread));
-        assert(g_state.execution_order[i] == i); // 按序号递增
+        assert(g_state.execution_order[i] == i);
     }
     printf("Batch tasks order and thread affinity verified.\n");
 
     free(task_ids);
-    // 释放 args 在任务函数中已释放，无需重复
+    // args 已在任务中释放
 }
 
 // 测试队列扩展（提交大量任务）
 static void test_queue_expansion(ThreadPoolHandle pool) {
     printf("\n=== Test queue expansion (many tasks) ===\n");
-    const int TASK_COUNT = 200; // 远超初始队列容量
+    const int TASK_COUNT = 200;
     int* args[TASK_COUNT];
 
     for (int i = 0; i < TASK_COUNT; i++) {
@@ -164,13 +175,11 @@ static void test_queue_expansion(ThreadPoolHandle pool) {
     printf("Submitted %d tasks, waiting for completion...\n", TASK_COUNT);
     test_state_wait_completion();
     printf("All %d tasks completed.\n", TASK_COUNT);
-    // 注意：args 已在任务中释放，无需再次释放
 }
 
 // 测试通用通知机制
 static void test_notify(ThreadPoolHandle pool) {
     printf("\n=== Test async_poll_notify ===\n");
-    // 发送几个通知
     int ret;
     ret = async_poll_notify(pool, 1, NULL);
     assert(ret == 0);
@@ -179,13 +188,10 @@ static void test_notify(ThreadPoolHandle pool) {
     ret = async_poll_notify(pool, 3, NULL);
     assert(ret == 0);
     printf("Sent 3 notifications.\n");
-    // 由于通知处理是异步的，我们无法直接验证，但可以通过日志观察（在asyncPoll线程中会打印）
-    // 为了等待通知被处理，可以短暂睡眠
-    usleep(100000);
-    // 我们可以在 asyncPoll 线程中增加记录逻辑，但这里不修改代码，只靠日志验证
+    usleep(100000); // 等待通知被处理（日志可见）
 }
 
-// 测试销毁（确保资源释放）
+// 测试销毁
 static void test_destroy(ThreadPoolHandle pool) {
     printf("\n=== Test thread pool destroy ===\n");
     thread_pool_destroy(pool);
@@ -195,18 +201,16 @@ static void test_destroy(ThreadPoolHandle pool) {
 int main() {
     printf("Starting thread pool tests...\n");
 
-    // 初始化线程池，设置较小的队列容量以触发扩展
-    ThreadPoolHandle pool = thread_pool_init(2, 4); // worker队列容量2，pending队列容量4
+    // 初始化测试状态（初始为0，分配会在每个测试前进行）
+    memset(&g_state, 0, sizeof(g_state));
+
+    // 初始化线程池
+    ThreadPoolHandle pool = thread_pool_init(2, 4);
     assert(pool != NULL);
 
-    // 启动线程池
     int ret = thread_pool_start(pool);
     assert(ret == 0);
     printf("Thread pool started.\n");
-
-    // 初始化测试状态（总任务数将在各个测试中逐步增加，但我们需要总计数）
-    // 这里我们分别运行测试，每个测试独立等待完成，所以每个测试前重新初始化状态
-    // 但注意回调是同一个，所以状态需要重置
 
     // 测试1：单个任务
     test_state_init(1);
@@ -216,7 +220,7 @@ int main() {
     test_state_init(5);
     test_batch_tasks(pool);
 
-    // 测试3：大量任务（200个）-> 队列扩展
+    // 测试3：大量任务（200个）
     test_state_init(200);
     test_queue_expansion(pool);
 
@@ -227,8 +231,8 @@ int main() {
     test_destroy(pool);
 
     // 释放测试状态资源
-    free(g_state.execution_order);
-    free(g_state.thread_ids);
+    if (g_state.execution_order) free(g_state.execution_order);
+    if (g_state.thread_ids) free(g_state.thread_ids);
     pthread_mutex_destroy(&g_state.lock);
     pthread_cond_destroy(&g_state.cond);
 
