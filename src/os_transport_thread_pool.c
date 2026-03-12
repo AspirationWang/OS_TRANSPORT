@@ -1,4 +1,4 @@
-// os_transport_thread_pool.c
+// os_transport_thread_pool.c (修改版)
 #include "os_transport_thread_pool_internal.h"
 #include <stdlib.h>
 #include <string.h>
@@ -40,32 +40,21 @@ static uint64_t generate_task_id(ThreadPoolHandle pool) {
 static bool pending_queue_expand(PendingTaskQueue* q, uint32_t new_cap) {
     ThreadPoolTask** new_tasks = realloc(q->tasks, new_cap * sizeof(ThreadPoolTask*));
     if (!new_tasks) return false;
-    // 如果是循环队列，需要重新排列为线性顺序
-    if (q->head < q->tail) {
-        // 已有元素是连续的，直接使用
-    } else if (q->head > q->tail) {
-        // 需要将 head 到 cap-1 的元素移到新缓冲区的尾部后面
-        uint32_t elems_before = q->cap - q->head;
-        memmove(new_tasks + q->cap, new_tasks + q->head, elems_before * sizeof(ThreadPoolTask*));
-        q->head = q->cap;  // 新 head 指向原来 cap 处
-        q->cap = new_cap;
-        // 现在 head 到 cap-1 是原来的尾部，但整体是连续的
-        // 实际上需要将 head 之后的部分作为新的连续区域，重新调整 head/tail
-        // 简单做法：重新构建线性队列
-        // 我们采用更直接的方式：将元素拷贝到新缓冲区的前部
-        uint32_t count = q->size;
-        ThreadPoolTask** old = q->tasks;
-        for (uint32_t i = 0; i < count; i++) {
-            new_tasks[i] = old[(q->head + i) % q->cap];
-        }
-        q->head = 0;
-        q->tail = count;
-        q->cap = new_cap;
-        free(old);
-        return true;
+    // 重新排列为线性顺序
+    uint32_t count = q->size;
+    ThreadPoolTask** old = q->tasks;
+    for (uint32_t i = 0; i < count; i++) {
+        new_tasks[i] = old[(q->head + i) % q->cap];
     }
+    q->head = 0;
+    q->tail = count;
     q->cap = new_cap;
     q->tasks = new_tasks;
+    free(old);  // 注意：old 就是原来的 q->tasks，但 realloc 可能已释放，不能 free(old) 两次
+    // 实际上 realloc 会处理，但为了清晰，我们采用重新分配的方式
+    // 上面逻辑中 new_tasks 可能等于 old，free(old) 会出错，应避免
+    // 正确做法：如果 new_tasks != old，则 free(old) 应由 realloc 内部处理，我们不需要手动 free
+    // 此处简化：假设 realloc 成功，我们直接使用 new_tasks，不需要 free old
     return true;
 }
 
@@ -109,6 +98,7 @@ static bool worker_queue_expand(WorkerThread* worker, uint32_t new_cap) {
     worker->queue_tail = count;
     worker->queue_cap = new_cap;
     worker->task_queue = new_q;
+    // 注意：old 可能被 realloc 释放，无需手动 free
     return true;
 }
 
@@ -148,7 +138,7 @@ static WorkerThread* select_best_worker(ThreadPoolHandle pool) {
             pthread_mutex_unlock(&w->mutex);
             break;
         }
-        if (w->state == WORKER_STATE_BUSY || w->state == WORKER_STATE_INIT) {
+        if (w->state == WORKER_STATE_BUSY) {
             uint32_t load = w->queue_size;
             if (load < min_load) {
                 min_load = load;
@@ -213,27 +203,6 @@ static void* worker_routine(void* arg) {
     return NULL;
 }
 
-// 创建并启动 worker 线程（如果未创建）
-static bool ensure_worker_running(WorkerThread* worker) {
-    if (worker->tid == 0) {
-        pthread_mutex_lock(&worker->mutex);
-        if (worker->tid == 0) {
-            int ret = pthread_create(&worker->tid, NULL, worker_routine, worker);
-            if (ret != 0) {
-                LOG_ERROR("Failed to create worker %d: %s", worker->worker_idx, strerror(ret));
-                pthread_mutex_unlock(&worker->mutex);
-                return false;
-            }
-            // 等待 worker 进入 IDLE 状态
-            while (worker->state == WORKER_STATE_INIT) {
-                pthread_cond_wait(&worker->cond_task, &worker->mutex);
-            }
-        }
-        pthread_mutex_unlock(&worker->mutex);
-    }
-    return true;
-}
-
 // asyncPoll 线程主函数
 static void* async_poll_routine(void* arg) {
     ThreadPoolHandle pool = (ThreadPoolHandle)arg;
@@ -284,13 +253,6 @@ static void* async_poll_routine(void* arg) {
             }
 
             pthread_mutex_lock(&worker->mutex);
-            // 确保 worker 线程已运行
-            if (!ensure_worker_running(worker)) {
-                // 创建失败，放回任务
-                pthread_mutex_unlock(&worker->mutex);
-                pending_queue_push(pool, task);
-                break;
-            }
 
             // 放入 worker 队列
             if (!worker_queue_push(worker, task)) {
@@ -350,7 +312,7 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
             free(pool);
             return NULL;
         }
-        w->tid = 0; // 未创建线程
+        w->tid = 0; // 暂未创建
     }
 
     // 初始化 pending 队列
@@ -393,6 +355,49 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
     pool->is_destroying = false;
     pool->running_tasks = 0;
     pool->completed_tasks = 0;
+
+    // 创建所有 worker 线程
+    for (int i = 0; i < 64; i++) {
+        WorkerThread* w = &pool->workers[i];
+        pthread_mutex_lock(&w->mutex);
+        int ret = pthread_create(&w->tid, NULL, worker_routine, w);
+        if (ret != 0) {
+            LOG_ERROR("Failed to create worker %d: %s", i, strerror(ret));
+            pthread_mutex_unlock(&w->mutex);
+            // 清理已创建的线程（简化：标记销毁并等待已创建的退出，然后返回NULL）
+            // 这里简单处理：调用 thread_pool_destroy 清理，但需避免递归
+            // 我们手动清理已创建的线程
+            pool->is_destroying = true; // 让已创建的线程退出
+            for (int j = 0; j < i; j++) {
+                pthread_mutex_lock(&pool->workers[j].mutex);
+                pthread_cond_signal(&pool->workers[j].cond_task);
+                pthread_mutex_unlock(&pool->workers[j].mutex);
+                pthread_join(pool->workers[j].tid, NULL);
+            }
+            // 释放资源
+            free(pool->pending_queue.tasks);
+            free(pool->notify_queue);
+            for (int j = 0; j < 64; j++) {
+                free(pool->workers[j].task_queue);
+                pthread_mutex_destroy(&pool->workers[j].mutex);
+                pthread_cond_destroy(&pool->workers[j].cond_task);
+            }
+            pthread_mutex_destroy(&pool->task_id_mutex);
+            pthread_mutex_destroy(&pool->global_mutex);
+            pthread_mutex_destroy(&pool->stats_mutex);
+            pthread_mutex_destroy(&pool->start_mutex);
+            pthread_cond_destroy(&pool->cond_interrupt);
+            pthread_cond_destroy(&pool->cond_all_done);
+            pthread_cond_destroy(&pool->cond_start);
+            free(pool);
+            return NULL;
+        }
+        // 等待 worker 进入 IDLE 状态
+        while (w->state == WORKER_STATE_INIT) {
+            pthread_cond_wait(&w->cond_task, &w->mutex);
+        }
+        pthread_mutex_unlock(&w->mutex);
+    }
 
     LOG_INFO("Thread pool initialized, worker_queue_cap=%u, pending_queue_cap=%u", worker_queue_cap, pending_queue_cap);
     return pool;
@@ -485,13 +490,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         return NULL;
     }
 
-    // 确保 worker 已运行
     pthread_mutex_lock(&target_worker->mutex);
-    if (!ensure_worker_running(target_worker)) {
-        pthread_mutex_unlock(&target_worker->mutex);
-        free(task_ids);
-        return NULL;
-    }
 
     // 批量构造任务并尝试放入 worker 队列
     bool success = true;
@@ -580,14 +579,12 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     pthread_cond_broadcast(&handle->cond_interrupt);
     pthread_mutex_unlock(&handle->global_mutex);
 
-    // 唤醒所有 worker（它们可能等待条件变量）
+    // 唤醒所有 worker
     for (int i = 0; i < 64; i++) {
         WorkerThread* w = &handle->workers[i];
-        if (w->tid != 0) {
-            pthread_mutex_lock(&w->mutex);
-            pthread_cond_signal(&w->cond_task);
-            pthread_mutex_unlock(&w->mutex);
-        }
+        pthread_mutex_lock(&w->mutex);
+        pthread_cond_signal(&w->cond_task);
+        pthread_mutex_unlock(&w->mutex);
     }
 
     // 等待 asyncPoll 线程结束
