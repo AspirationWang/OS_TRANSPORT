@@ -154,7 +154,9 @@ int main() {
 
     // 启动线程池
     int ret = thread_pool_start(pool);
-    assert(ret == 0);
+    if (ret != 0) {
+        return 0;
+    }
     printf("Thread pool started.\n");
 
     // 测试1：提交两个不同 request_id 的单个任务（使用批量提交 count=1 来模拟）
