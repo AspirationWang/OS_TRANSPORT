@@ -1,3 +1,4 @@
+#include "os_transport_thread_pool.h"
 #include "os_transport_thread_pool_internal.h"
 #include <stdlib.h>
 #include <string.h>
