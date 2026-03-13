@@ -654,7 +654,7 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
         WorkerThread* w = &handle->workers[i];
         pthread_mutex_lock(&w->mutex);
         while (w->queue_size > 0) {
-            ThreadPoolTask* task = worker_queue_pop_by_req(w, UINT64_MAX); // 取任意任务
+            ThreadPoolTask* task = worker_queue_pop_by_req(w, UINT32_MAX); // 取任意任务
             if (task) {
                 free(task->task_arg);
                 free(task);
