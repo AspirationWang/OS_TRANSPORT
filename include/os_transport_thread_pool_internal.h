@@ -34,7 +34,20 @@ typedef struct {
     uint32_t queue_head;            // 队列头指针
     uint32_t queue_tail;            // 队列尾指针
     uint32_t queue_size;            // 当前队列任务数
+    uint64_t pending_req;           // 等待执行的 request_id（0表示无待执行）
 } WorkerThread;
+
+/**
+ * @brief 请求上下文
+ */
+typedef struct RequestContext {
+    uint64_t request_id;
+    int worker_idx;                    // 绑定的 worker 索引
+    int pending_count;                  // 剩余任务数
+    TaskCompleteCb batch_cb;            // 批次完成回调
+    void* batch_user_data;
+    struct RequestContext* next;        // 哈希冲突链表
+} RequestContext;
 
 /**
  * @brief 全局Pending队列（缓存Worker队列满的任务）
@@ -59,11 +72,12 @@ typedef struct {
 /**
  * @brief urma相关信息，用于与asyncPool线程绑定
  */
-typedef struct {
-    urma_jfce_t *jfce;
-    urma_jfc_t *jfc;
-} ThreadPoolUrmaInfo;
+// typedef struct {
+//     urma_jfce_t *jfce;
+//     urma_jfc_t *jfc;
+// } ThreadPoolUrmaInfo;
 
+#define REQ_HASH_SIZE 1024
 /**
  * @brief 线程池内部结构
  */
@@ -111,7 +125,10 @@ struct _ThreadPool {
     uint32_t notify_queue_tail;  // 队列尾（存通知）
     uint32_t notify_queue_size;  // 队列当前通知数
 
-    ThreadPoolUrmaInfo urmaInfo;
+    // ThreadPoolUrmaInfo urmaInfo;
+
+    RequestContext* req_hash[REQ_HASH_SIZE];  // request_id 哈希表
+    pthread_mutex_t req_hash_mutex;           // 保护哈希表
 };
 
 // 日志级别

@@ -9,6 +9,7 @@
  */
 typedef struct {
     uint64_t task_id;                 // 唯一任务ID
+    uint64_t request_id;              // 请求ID（相同批次任务此值相同）
     void (*task_func)(void* arg);     // 任务执行函数
     void* task_arg;                   // 任务参数（用户自行管理内存）
     bool is_completed;                // 任务完成标记
@@ -64,14 +65,17 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
  * @param task_count 任务数量
  * @param complete_cb 任务完成回调
  * @param user_data 回调透传数据
+ * @param batch_complete_cb 批量任务全部完成回调透传数据
+ * @param batch_user_data 批量任务全部完成回调透传数据
  * @return 任务ID数组（长度=task_count，NULL=失败，用户需自行释放）
  */
 uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
                                          ThreadPoolTask* tasks,
                                          uint32_t task_count,
                                          TaskCompleteCb complete_cb,
-                                         void* user_data);
-
+                                         void* user_data,
+                                         TaskCompleteCb batch_complete_cb,
+                                         void* batch_user_data);
 /**
  * @brief 通用通知asyncPoll接口（支持自定义事件）
  * @param handle 线程池句柄
@@ -80,6 +84,14 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
  * @return 0=成功，-1=失败
  */
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
+
+/**
+ * @brief 通用通知asyncPoll接口
+ * @param handle 线程池句柄
+ * @param request_id 任务ID
+ * @return 0=成功，-1=失败
+ */
+int async_poll_notify_task(ThreadPoolHandle handle, uint64_t request_id);
 
 /**
  * @brief 销毁线程池（等待所有任务完成，释放资源）
