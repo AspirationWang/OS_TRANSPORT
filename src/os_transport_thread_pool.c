@@ -258,7 +258,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         } else if (cnt > 0 && (uint32_t)cnt <= cr_num) {
             if (urma_event_mode) {
                 /* 事件模式 */
-                urma_ack_jfc(jfc, &ack_cnt, 1);
+                urma_ack_jfc((urma_jfc_t **)(&jfc), &ack_cnt, 1);
                 urma_status_t status = urma_rearm_jfc(jfc, false);
                 if (status != URMA_SUCCESS) {
                     LOG_ERROR("Faided to rearm jfc. ret = %d.", status);
@@ -267,7 +267,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
             }
             for (int cr_loop = 0; cr_loop < cnt; cr_loop++) {
                 if (cr[cr_loop].status != URMA_SUCCESS) {
-                    LOG_ERROR("Faided to poll jfc. count = %d, ret = %d.", cr_loop, status);
+                    LOG_ERROR("Faided to poll jfc. count = %d, ret = %d.", cr_loop, cr[cr_loop].status);
                     return -1;
                 }
             }
@@ -282,7 +282,7 @@ static void* async_poll_routine(void* arg) {
     urma_cr_t *cr = calloc(POLL_SIZE, sizeof(urma_cr_t));
     if (!cr) {
         LOG_ERROR("calloc cr failed.");
-        return;
+        return NULL;
     }
     LOG_INFO("asyncPoll thread started");
 
