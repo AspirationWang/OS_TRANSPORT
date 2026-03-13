@@ -9,6 +9,10 @@ static int g_inited = 0;
 
 uint32_t os_transport_init(urma_context_t* urma_ctx, os_transport_cfg_t* ost_cfg, void** handle)
 {
+    if (!ost_cfg || !handle) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     if (g_inited) {
         fprintf(stderr, "os_transport: 已初始化\n");
         return -1;
@@ -40,11 +44,17 @@ uint32_t os_transport_init(urma_context_t* urma_ctx, os_transport_cfg_t* ost_cfg
         return -1;
     }
 
-    *handle = (void*)ost_handle;
-
-    // 先注册jfc，后续看情况是否需要再修改
-    os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void*)ost_handle);
     g_inited = 1;
+    // 先置为已初始化，再注册jfc
+    if (os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void*)ost_handle) != 0) {
+        fprintf(stderr, "os_transport: JFC注册失败\n");
+        g_inited = 0;
+        thread_pool_destroy(ost_handle->thread_pool);
+        ost_handle->thread_pool = NULL;
+        free(ost_handle);
+        return -1;
+    }
+    *handle = (void*)ost_handle;
 
     return 0;
 }
@@ -61,9 +71,16 @@ uint32_t os_transport_reg_jfc(urma_jfce_t* jfce, urma_jfc_t* jfc, void* handle)
         fprintf(stderr, "os_transport: 未初始化\n");
         return -1;
     }
+    if (!handle) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     os_transport_handle_t *ost_handle = (os_transport_handle_t*)handle;
     // 初始化完成，poll线程已拉起，更新jfc，绑定poll
-    update_jfc_for_poll(jfce, jfc, ost_handle);
+    if (update_jfc_for_poll(jfce, jfc, ost_handle) != 0) {
+        fprintf(stderr, "os_transport: JFC更新失败\n");
+        return -1;
+    }
 
     printf("os_transport: JFC注册成功\n");
     return 0;
@@ -126,15 +143,22 @@ ThreadPoolTask construct_worker_task(uint64_t task_id, void (*task_func)(void*),
 uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
                                             struct chunk_info *chunks, uint64_t chunk_num,
                                             task_type_t type, void (*task_func)(void *),
-                                            task_sync_t **sync_handle, urma_info_t urma_info)
+                                            urma_info_t urma_info, task_sync_t **sync_handle)
 {
+    if (!ost_handle || !chunks || !sync_handle || chunk_num == 0) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
+
+    *sync_handle = NULL;
+
     task_sync_t* sync;
     sync = malloc(sizeof(task_sync_t));
     if (!sync) {
         fprintf(stderr, "os_transport: 内存分配失败\n");
         return -1;
     }
-    *sync_handle = sync;
+
     if (type == SEND_TASK) {
         // 只分配 chunk_num - 1 个 task（chunk[0] 由主线程发送）
         uint64_t task_count = chunk_num - 1;
@@ -142,7 +166,6 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
         if (!tasks) {
             fprintf(stderr, "os_transport: 内存分配失败\n");
             free(sync);
-            *sync_handle = NULL;
             return -1;
         }
         // 从chunk[1]开始构造send类型的task并注册到线程池，chunk[0]由主线程发送
@@ -159,7 +182,6 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
                 }
                 free(tasks);
                 free(sync);
-                *sync_handle = NULL;
                 return -1;
             }
             tasks[i] = construct_worker_task(chunk_idx, task_func, send_task_arg);
@@ -187,23 +209,25 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
         return -1;
     }
 
+    // 返回同步句柄给主函数，供其等待任务完成
+    *sync_handle = sync;
+
     return 0;
 }
 
-void do_send_chunk_for_worker(urma_write_info_t write_info)
+void do_send_chunk_for_worker(urma_write_info_t write_info, struct chunk_info *chunk_info)
 {
-    // 这里可以调用实际的发送函数来发送数据，例如：
-    // urma_write_with_notify(g_urma_ctx, jetty_info, remote_dst, local_src, dst, src,
-    // local_src[0].len, flag, user_ctx);
+    urma_write_with_notify(write_info, chunk_info);
 }
 
 // worker线程执行的任务函数，负责发送chunk
 void send_task_worker_func(void* arg)
 {
     send_task_arg_t* send_task_arg = (send_task_arg_t*)arg;
-    do_send_chunk_for_worker(send_task_arg->write_info);
+    do_send_chunk_for_worker(send_task_arg->write_info, send_task_arg->chunk_info);
     // 如果是最后一个分片，则唤醒os_transport_send的线程继续执行
     if (!send_task_arg->is_last_chunk) {
+        free(send_task_arg->chunk_info);
         free(send_task_arg);
         return;
     }
@@ -212,6 +236,7 @@ void send_task_worker_func(void* arg)
     sync->request_completed = 1;
     pthread_cond_signal(&sync->cond);
     pthread_mutex_unlock(&sync->mutex);
+    free(send_task_arg->chunk_info);
     free(send_task_arg);
 }
 
@@ -220,6 +245,10 @@ void send_task_worker_func(void* arg)
 uint32_t split_chunks(struct buffer_info* local_src, struct buffer_info* remote_dst,
                       uint32_t len, struct chunk_info** ret_chunks, uint64_t* ret_chunk_num)
 {
+    if (!local_src || !remote_dst || !ret_chunks || !ret_chunk_num || len == 0) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     size_t total_len = len;
     struct chunk_info *chunks;
     size_t chunks_num = (total_len + DEFAULT_CHUNK_SIZE - 1) / DEFAULT_CHUNK_SIZE;
@@ -243,6 +272,9 @@ uint32_t split_chunks(struct buffer_info* local_src, struct buffer_info* remote_
 
 void wait_for_task_complete(task_sync_t* sync_handle)
 {
+    if (!sync_handle) {
+        return;
+    }
     pthread_mutex_lock(&sync_handle->mutex);
     while (!sync_handle->request_completed) {
         pthread_cond_wait(&sync_handle->cond, &sync_handle->mutex);
@@ -262,6 +294,10 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
                            struct buffer_info *local_src, struct buffer_info *remote_dst,
                            uint32_t len, uint32_t server_key, uint32_t client_key)
 {
+    if (!handle || !jetty_info || !local_src || !remote_dst || len == 0) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     if (!g_inited) {
         fprintf(stderr, "os_transport: 未初始化\n");
         return -1;
@@ -270,10 +306,22 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
     // 若源数据长度小于等于DEFAULT_CHUNK_SIZE，则直接发送；否则需要将数据拆分为多个chunk进行发送
     if (len <= DEFAULT_CHUNK_SIZE) {
-        // 这里可以调用实际的发送函数来发送数据，例如：
-        // urma_write_with_notify(g_urma_ctx, jetty_info, remote_dst, local_src, dst, src,
-        // local_src[0].len, flag, user_ctx);
-        return 0;
+        urma_write_info_t write_info = {
+            .jfs = jetty_info->jfs,
+            .jetty = jetty_info->jetty,
+            .target_jfr = jetty_info->tjetty,
+            .dst_tseg = remote_dst->tseg,
+            .src_tseg = local_src->tseg,
+            .flag = {0},
+            .user_ctx_server = server_key,
+            .user_ctx_client = client_key
+        };
+        struct chunk_info chunk = {
+            .src = local_src[0].addr,
+            .dst = remote_dst[0].addr,
+            .len = len
+        };
+        return (urma_write_with_notify(write_info, &chunk) == URMA_SUCCESS) ? 0 : -1;
     }
 
     // 将源地址中的数据拆分为多个chunk，每个chunk的大小不超过DEFAULT_CHUNK_SIZE
@@ -299,14 +347,20 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     // 构造task并注册，注意最后一个chunk的task需要负责唤醒os_transport_send的线程继续执行
     task_sync_t* sync_handle;
     if (construct_and_register_worker_task(
-            ost_handle, chunks, chunks_num, SEND_TASK, send_task_worker_func, &sync_handle, urma_info) != 0) {
+            ost_handle, chunks, chunks_num, SEND_TASK, send_task_worker_func, urma_info, &sync_handle) != 0) {
         free(chunks);
         return -1;
     }
 
     // 手动发送第一个chunk
-    // urma_write_with_notify(g_urma_ctx, jetty_info, remote_dst, local_src, dst, src,
-    // local_src[0].len, flag, user_ctx);
+    if (urma_write_with_notify(urma_info.write_info, &chunks[0]) != URMA_SUCCESS) {
+        wait_for_task_complete(sync_handle);
+        free(chunks);
+        pthread_mutex_destroy(&sync_handle->mutex);
+        pthread_cond_destroy(&sync_handle->cond);
+        free(sync_handle);
+        return -1;
+    }
 
     wait_for_task_complete(sync_handle);
 
@@ -348,6 +402,13 @@ void recv_task_worker_func(void* arg)
 uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
                            struct buffer_info* device_dst, uint32_t buffer_num, uint32_t client_key)
 {
+    (void)host_src;
+    (void)device_dst;
+    (void)client_key;
+    if (!handle) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     if (!g_inited) {
         fprintf(stderr, "os_transport: 未初始化\n");
         return -1;
@@ -357,37 +418,16 @@ uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
         return -1;
     }
 
-    os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
-
-    // 将host源数据拆分为多个chunk
-    struct chunk_info* chunks;
-    uint64_t chunks_num;
-    // TODO: 需要确定 recv 场景下的数据总长度获取方式，目前暂时使用 0 作为占位
-    uint32_t total_len = 0;
-    if (split_chunks(host_src, device_dst, total_len, &chunks, &chunks_num) != 0) {
-        return -1;
-    }
-
-    // 构造recv类型的task并注册
-    urma_info_t urma_info = {0};
-    task_sync_t* sync_handle;
-    if (construct_and_register_worker_task(
-            ost_handle, chunks, chunks_num, RECV_TASK, recv_task_worker_func, &sync_handle, urma_info) != 0) {
-        free(chunks);
-        return -1;
-    }
-    // 等待所有task完成后返回
-    wait_for_task_complete(sync_handle);
-
-    free(chunks);
-    pthread_mutex_destroy(&sync_handle->mutex);
-    pthread_cond_destroy(&sync_handle->cond);
-    free(sync_handle);
-    return 0;
+    fprintf(stderr, "os_transport: recv路径暂未实现\n");
+    return -1;
 }
 
 uint32_t os_transport_destroy(void* handle)
 {
+    if (!handle) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
     os_transport_handle_t *ost_handle = (os_transport_handle_t*)handle;
     if (!g_inited) return -1;
 
