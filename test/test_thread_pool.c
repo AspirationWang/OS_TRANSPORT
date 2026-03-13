@@ -191,7 +191,7 @@ int main() {
     printf("Sending notify for req %u\n", req1);
     mock_event_queue_push(req1);
     usleep(50000);
-    printf("Sending notify for req %lu\n", req2);
+    printf("Sending notify for req %u\n", req2);
     mock_event_queue_push(req2);
 
     test_state_wait_completion();
