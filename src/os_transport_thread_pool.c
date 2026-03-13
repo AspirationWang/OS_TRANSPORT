@@ -23,7 +23,7 @@ typedef struct {
 // 任务包装函数
 static void internal_task_wrapper(void* arg) {
     InternalTask* itask = (InternalTask*)arg;
-    LOG_DEBUG("Task %lu (req=%lu) started", itask->task_id, itask->request_id);
+    LOG_DEBUG("Task %lu (req=%u) started", itask->task_id, itask->request_id);
     itask->user_func(itask->user_arg);
     if (itask->complete_cb) {
         itask->complete_cb(itask->task_id, itask->success, itask->user_data);
@@ -67,7 +67,7 @@ static bool worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
     worker->task_queue[worker->queue_tail] = task;
     worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
     worker->queue_size++;
-    LOG_DEBUG("Worker %d pushed task %lu (req=%lu), queue size now %u",
+    LOG_DEBUG("Worker %d pushed task %lu (req=%u), queue size now %u",
               worker->worker_idx, task->task_id, task->request_id, worker->queue_size);
     return true;
 }
@@ -90,7 +90,7 @@ static ThreadPoolTask* worker_queue_pop_by_req(WorkerThread* worker, uint32_t re
             // 调整尾指针
             worker->queue_tail = (worker->queue_tail + worker->queue_cap - 1) % worker->queue_cap;
             worker->queue_size--;
-            LOG_DEBUG("Worker %d popped task %lu for req %lu", worker->worker_idx, task->task_id, req_id);
+            LOG_DEBUG("Worker %d popped task %lu for req %u", worker->worker_idx, task->task_id, req_id);
             return task;
         }
     }
@@ -239,7 +239,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
             return -1;
         } else if (cnt == 0) {
             LOG_ERROR("Wait jfc finished. cnt = %d.", cnt);
-            return = 0;
+            return 0;
         }
         jfc = ev_jfc;
         try_cnt = 1;
@@ -248,7 +248,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         LOG_ERROR("Invailed jfc!");
     }
 
-    for (int loop = 0; loop < try_cnt; loop++) {
+    for (uint32_t loop = 0; loop < try_cnt; loop++) {
         cnt = urma_poll_jfc(jfc, cr_num, cr); /* 一次拉取的时候，可能存在多条数据 */
         if (cnt == 0) {
             continue;
