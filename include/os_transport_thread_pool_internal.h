@@ -15,12 +15,12 @@
 #include <time.h>
 #include <stdarg.h>
 
-struct union {
+typedef union {
     struct {
         uint64_t chunk_type   : 2;
         uint64_t chunk_id     : 6;
         uint64_t chunk_size   : 24;
-        unint64_t request_id  : 32;
+        uint64_t request_id  : 32;
     } bs;
     uint64_t user_ctx;
 } TransportData;
