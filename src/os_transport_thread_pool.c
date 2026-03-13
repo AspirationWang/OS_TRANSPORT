@@ -312,7 +312,7 @@ static void* async_poll_routine(void* arg) {
                 LOG_ERROR("Error opcode");
             }
             uint32_t request_id = user_data.bs.request_id;
-            LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);、
+            LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);
             // 查找该 request_id 绑定的 worker
             RequestContext* ctx = find_req_context(pool, request_id);
             if (!ctx) {
