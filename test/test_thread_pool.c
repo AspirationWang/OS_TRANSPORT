@@ -134,7 +134,7 @@ static void test_complete_cb(uint64_t task_id, bool success, void* user_data) {
 // 批次完成回调
 static void batch_complete_cb(uint64_t task_id, bool success, void* user_data) {
     uint32_t req_id = (uint64_t)(uintptr_t)user_data;
-    printf("Batch complete for request_id %lu, success=%d\n", req_id, success);
+    printf("Batch complete for request_id %u, success=%d\n", req_id, success);
 
     pthread_mutex_lock(&g_state.lock);
     g_state.batch_completed_count++;
@@ -188,7 +188,7 @@ int main() {
     free(ids2);
 
     // 发送通知
-    printf("Sending notify for req %lu\n", req1);
+    printf("Sending notify for req %u\n", req1);
     mock_event_queue_push(req1);
     usleep(50000);
     printf("Sending notify for req %lu\n", req2);
@@ -294,8 +294,8 @@ int main() {
 
     // 验证每个request_id内部顺序（由于并发，全局顺序可能交错，但每个req内部应有序）
     // 我们可以分别统计两个req的执行顺序
-    int exec_a[TASKS_PER_REQ] = {0};
-    int exec_b[TASKS_PER_REQ] = {0};
+    int exec_a[TASKS_PER_REQ] = { 0 };
+    int exec_b[TASKS_PER_REQ] = { 0 };
     int count_a = 0, count_b = 0;
     for (int i = 0; i < g_state.exec_index; i++) {
         int val = g_state.exec_order[i];
