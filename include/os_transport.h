@@ -55,6 +55,10 @@ typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
     int request_completed;   // 该请求的所有task是否都已完成
+    uint64_t total_tasks;    // 任务组总任务数
+    uint64_t completed_tasks;// 任务组已完成任务数
+    void *group_task_args;   // 任务组参数块，由主线程统一释放
+    struct chunk_info *chunks; // 本次请求关联的chunk数组，由主线程统一释放
 } task_sync_t;
 
 // send类型的task参数，包括：

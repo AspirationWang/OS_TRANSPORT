@@ -6,6 +6,37 @@
 #include <string.h>
 // 全局初始化状态
 static int g_inited = 0;
+void wait_for_task_complete(task_sync_t* sync_handle);
+
+typedef struct {
+    ThreadPoolTask *tasks;
+    void *task_args;
+} task_group_alloc_t;
+
+static void free_task_group_alloc(task_sync_t *sync)
+{
+    if (!sync || !sync->group_task_args) {
+        return;
+    }
+    task_group_alloc_t *alloc = (task_group_alloc_t*)sync->group_task_args;
+    free(alloc->task_args);
+    free(alloc->tasks);
+    free(alloc);
+    sync->group_task_args = NULL;
+}
+
+static void free_sync_owned_resources(task_sync_t *sync)
+{
+    if (!sync) {
+        return;
+    }
+    free_task_group_alloc(sync);
+    free(sync->chunks);
+    sync->chunks = NULL;
+    pthread_mutex_destroy(&sync->mutex);
+    pthread_cond_destroy(&sync->cond);
+    free(sync);
+}
 
 uint32_t os_transport_init(urma_context_t* urma_ctx, os_transport_cfg_t* ost_cfg, void** handle)
 {
@@ -87,14 +118,9 @@ uint32_t os_transport_reg_jfc(urma_jfce_t* jfce, urma_jfc_t* jfc, void* handle)
 }
 
 // 构造send任务的函数参数
-send_task_arg_t* construct_send_task_arg(urma_write_info_t write_info, struct chunk_info *chunk_info, uint64_t chunk_id,
-                                         bool is_last_chunk, task_sync_t* sync)
+void construct_send_task_arg(send_task_arg_t* arg, urma_write_info_t write_info, struct chunk_info *chunk_info,
+                             uint64_t chunk_id, bool is_last_chunk, task_sync_t* sync)
 {
-    send_task_arg_t* arg = malloc(sizeof(send_task_arg_t));
-    if (!arg) {
-        fprintf(stderr, "os_transport: 内存分配失败\n");
-        return NULL;
-    }
     // 显式构造每个位域字段，避免隐式保留旧值
     os_transport_user_data_t user_data_server = {0};
     user_data_server.bs.request_id = write_info.user_ctx_server; // 将server_key作为request_id传入
@@ -114,17 +140,18 @@ send_task_arg_t* construct_send_task_arg(urma_write_info_t write_info, struct ch
     arg->chunk_info = chunk_info;
     arg->is_last_chunk = is_last_chunk;
 
-    if (is_last_chunk) {
-        // 最后一个chunk的task需要负责唤醒os_transport_send的线程继续执行，因此需要初始化同步信息
-        arg->sync = sync;
-        pthread_mutex_init(&arg->sync->mutex, NULL);
-        pthread_cond_init(&arg->sync->cond, NULL);
-        arg->sync->request_completed = 0;
-    } else {
-        // 非最后一个chunk的task不需要同步信息
-        arg->sync = NULL;
-    }
-    return arg;
+    // 同组所有task共享一个同步对象，便于主线程等待整组完成
+    arg->sync = sync;
+}
+
+void construct_recv_task_arg(recv_task_arg_t *arg, recv_info_t recv_info,
+                             struct chunk_info *chunk_info, bool is_last_chunk, task_sync_t *sync)
+{
+    memset(arg, 0, sizeof(*arg));
+    arg->recv_info = recv_info;
+    arg->chunk_info = chunk_info;
+    arg->is_last_chunk = is_last_chunk;
+    arg->sync = sync;
 }
 
 // 构建供worker取用的task信息
@@ -136,6 +163,7 @@ ThreadPoolTask construct_worker_task(uint64_t task_id, void (*task_func)(void*),
     task.task_func = task_func;
     task.task_arg = task_arg;
     task.is_completed = false;
+    task.free_task_self = false;
     return task;
 }
 
@@ -145,6 +173,11 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
                                             task_type_t type, void (*task_func)(void *),
                                             urma_info_t urma_info, task_sync_t **sync_handle)
 {
+    bool sync_inited = false;
+    task_sync_t* sync = NULL;
+    task_group_alloc_t *alloc = NULL;
+    uint64_t *task_ids = NULL;
+
     if (!ost_handle || !chunks || !sync_handle || chunk_num == 0) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
@@ -152,67 +185,109 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
 
     *sync_handle = NULL;
 
-    task_sync_t* sync;
     sync = malloc(sizeof(task_sync_t));
     if (!sync) {
         fprintf(stderr, "os_transport: 内存分配失败\n");
-        return -1;
+        goto err_out;
     }
+    memset(sync, 0, sizeof(*sync));
+    if (pthread_mutex_init(&sync->mutex, NULL) != 0 ||
+        pthread_cond_init(&sync->cond, NULL) != 0) {
+        fprintf(stderr, "os_transport: 同步对象初始化失败\n");
+        goto err_out;
+    }
+    sync_inited = true;
 
     if (type == SEND_TASK) {
+        if (chunk_num < 2) {
+            fprintf(stderr, "os_transport: chunk数量非法\n");
+            goto err_out;
+        }
         // 只分配 chunk_num - 1 个 task（chunk[0] 由主线程发送）
         uint64_t task_count = chunk_num - 1;
-        ThreadPoolTask* tasks = malloc(task_count * sizeof(ThreadPoolTask));
-        if (!tasks) {
+        alloc = calloc(1, sizeof(task_group_alloc_t));
+        if (!alloc) {
             fprintf(stderr, "os_transport: 内存分配失败\n");
-            free(sync);
-            return -1;
+            goto err_out;
         }
+        alloc->tasks = calloc(task_count, sizeof(ThreadPoolTask));
+        alloc->task_args = calloc(task_count, sizeof(send_task_arg_t));
+        if (!alloc->tasks || !alloc->task_args) {
+            fprintf(stderr, "os_transport: 内存分配失败\n");
+            goto err_out;
+        }
+        send_task_arg_t *task_args = (send_task_arg_t*)alloc->task_args;
+
+        sync->total_tasks = task_count;
         // 从chunk[1]开始构造send类型的task并注册到线程池，chunk[0]由主线程发送
         for (uint64_t i = 0; i < task_count; i++) {
             uint64_t chunk_idx = i + 1; // 对应 chunks 数组中的索引
             bool is_last_chunk = (chunk_idx == chunk_num - 1) ? true : false;
-            send_task_arg_t *send_task_arg =
-                construct_send_task_arg(urma_info.write_info, &chunks[chunk_idx], chunk_idx, is_last_chunk, sync);
-            if (!send_task_arg) {
-                fprintf(stderr, "os_transport: 任务参数构造失败\n");
-                // 释放已创建的 task 参数
-                for (uint64_t j = 0; j < i; j++) {
-                    free(tasks[j].task_arg);
-                }
-                free(tasks);
-                free(sync);
-                return -1;
-            }
-            tasks[i] = construct_worker_task(chunk_idx, task_func, send_task_arg);
+            construct_send_task_arg(&task_args[i], urma_info.write_info, &chunks[chunk_idx], chunk_idx, is_last_chunk, sync);
+            alloc->tasks[i] = construct_worker_task(chunk_idx, task_func, &task_args[i]);
         }
         // 批量提交任务到线程池
-        uint64_t *task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, tasks, task_count, NULL, NULL);
+        task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, task_count, NULL, NULL);
         if (!task_ids) {
             fprintf(stderr, "os_transport: 任务提交失败\n");
-            for (uint64_t j = 0; j < task_count; j++) {
-                free(tasks[j].task_arg);
-            }
-            free(tasks);
-            free(sync);
-            *sync_handle = NULL;
-            return -1;
+            goto err_out;
         }
         free(task_ids);
-        free(tasks);
+        task_ids = NULL;
+        sync->group_task_args = alloc;
+        alloc = NULL;
     } else if (type == RECV_TASK) {
-        // 构造recv类型的task，类似于send类型的task
+        alloc = calloc(1, sizeof(task_group_alloc_t));
+        if (!alloc) {
+            fprintf(stderr, "os_transport: 内存分配失败\n");
+            goto err_out;
+        }
+        alloc->tasks = calloc(chunk_num, sizeof(ThreadPoolTask));
+        alloc->task_args = calloc(chunk_num, sizeof(recv_task_arg_t));
+        if (!alloc->tasks || !alloc->task_args) {
+            fprintf(stderr, "os_transport: 内存分配失败\n");
+            goto err_out;
+        }
+        recv_task_arg_t *task_args = (recv_task_arg_t*)alloc->task_args;
+        recv_info_t recv_info = {0};
+        sync->total_tasks = chunk_num;
+        for (uint64_t i = 0; i < chunk_num; i++) {
+            bool is_last_chunk = (i == chunk_num - 1);
+            construct_recv_task_arg(&task_args[i], recv_info, &chunks[i], is_last_chunk, sync);
+            alloc->tasks[i] = construct_worker_task(i, task_func, &task_args[i]);
+        }
+        task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, chunk_num, NULL, NULL);
+        if (!task_ids) {
+            fprintf(stderr, "os_transport: recv任务提交失败\n");
+            goto err_out;
+        }
+        free(task_ids);
+        task_ids = NULL;
+        sync->group_task_args = alloc;
+        alloc = NULL;
     } else {
         fprintf(stderr, "os_transport: 任务类型错误\n");
-        free(sync);
-        *sync_handle = NULL;
-        return -1;
+        goto err_out;
     }
 
-    // 返回同步句柄给主函数，供其等待任务完成
     *sync_handle = sync;
-
     return 0;
+
+err_out:
+    free(task_ids);
+    if (alloc) {
+        free(alloc->task_args);
+        free(alloc->tasks);
+        free(alloc);
+    }
+    if (sync) {
+        if (sync_inited) {
+            pthread_mutex_destroy(&sync->mutex);
+            pthread_cond_destroy(&sync->cond);
+        }
+        free(sync);
+    }
+    return -1;
 }
 
 void do_send_chunk_for_worker(urma_write_info_t write_info, struct chunk_info *chunk_info)
@@ -225,19 +300,17 @@ void send_task_worker_func(void* arg)
 {
     send_task_arg_t* send_task_arg = (send_task_arg_t*)arg;
     do_send_chunk_for_worker(send_task_arg->write_info, send_task_arg->chunk_info);
-    // 如果是最后一个分片，则唤醒os_transport_send的线程继续执行
-    if (!send_task_arg->is_last_chunk) {
-        free(send_task_arg->chunk_info);
-        free(send_task_arg);
+    task_sync_t* sync = send_task_arg->sync ? send_task_arg->sync : NULL;
+    if (!sync) {
         return;
     }
-    task_sync_t* sync = send_task_arg->sync;
     pthread_mutex_lock(&sync->mutex);
-    sync->request_completed = 1;
-    pthread_cond_signal(&sync->cond);
+    sync->completed_tasks++;
+    if (sync->completed_tasks == sync->total_tasks) {
+        sync->request_completed = 1;
+        pthread_cond_signal(&sync->cond);
+    }
     pthread_mutex_unlock(&sync->mutex);
-    free(send_task_arg->chunk_info);
-    free(send_task_arg);
 }
 
 // 切分chunk的函数，负责将数据切分为多个chunk
@@ -351,23 +424,20 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
         free(chunks);
         return -1;
     }
+    sync_handle->chunks = chunks;
 
     // 手动发送第一个chunk
     if (urma_write_with_notify(urma_info.write_info, &chunks[0]) != URMA_SUCCESS) {
         wait_for_task_complete(sync_handle);
-        free(chunks);
-        pthread_mutex_destroy(&sync_handle->mutex);
-        pthread_cond_destroy(&sync_handle->cond);
-        free(sync_handle);
+        free_sync_owned_resources(sync_handle);
+        sync_handle = NULL;
         return -1;
     }
 
     wait_for_task_complete(sync_handle);
 
-    free(chunks);
-    pthread_mutex_destroy(&sync_handle->mutex);
-    pthread_cond_destroy(&sync_handle->cond);
-    free(sync_handle);
+    free_sync_owned_resources(sync_handle);
+    sync_handle = NULL;
     return 0;
 }
 
@@ -381,17 +451,17 @@ void recv_task_worker_func(void* arg)
 {
     recv_task_arg_t* recv_task_arg = (recv_task_arg_t*)arg;
     do_recv_chunk_for_worker(recv_task_arg->recv_info);
-    // 如果是最后一个分片，则唤醒os_transport_recv的线程继续执行
-    if (!recv_task_arg->is_last_chunk) {
-        free(recv_task_arg);
+    task_sync_t* sync = recv_task_arg->sync ? recv_task_arg->sync : NULL;
+    if (!sync) {
         return;
     }
-    task_sync_t* sync = recv_task_arg->sync;
     pthread_mutex_lock(&sync->mutex);
-    sync->request_completed = 1;
-    pthread_cond_signal(&sync->cond);
+    sync->completed_tasks++;
+    if (sync->completed_tasks == sync->total_tasks) {
+        sync->request_completed = 1;
+        pthread_cond_signal(&sync->cond);
+    }
     pthread_mutex_unlock(&sync->mutex);
-    free(recv_task_arg);
 }
 
 /*
@@ -402,10 +472,8 @@ void recv_task_worker_func(void* arg)
 uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
                            struct buffer_info* device_dst, uint32_t buffer_num, uint32_t client_key)
 {
-    (void)host_src;
-    (void)device_dst;
     (void)client_key;
-    if (!handle) {
+    if (!handle || !host_src || !device_dst || buffer_num == 0) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
     }
@@ -413,13 +481,32 @@ uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
         fprintf(stderr, "os_transport: 未初始化\n");
         return -1;
     }
-    if (buffer_num != 1) {
-        fprintf(stderr, "os_transport: 目前仅支持1个buffer的接收\n");
+    os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
+    struct chunk_info* chunks = calloc(buffer_num, sizeof(struct chunk_info));
+    if (!chunks) {
+        fprintf(stderr, "os_transport: 内存分配失败\n");
         return -1;
     }
+    for (uint32_t i = 0; i < buffer_num; i++) {
+        chunks[i].src = host_src[i].addr;
+        chunks[i].dst = device_dst[i].addr;
+        chunks[i].len = DEFAULT_CHUNK_SIZE;
+    }
 
-    fprintf(stderr, "os_transport: recv路径暂未实现\n");
-    return -1;
+    urma_info_t urma_info = {0};
+    task_sync_t* sync_handle;
+    if (construct_and_register_worker_task(
+            ost_handle, chunks, buffer_num, RECV_TASK, recv_task_worker_func, urma_info, &sync_handle) != 0) {
+        free(chunks);
+        return -1;
+    }
+    sync_handle->chunks = chunks;
+
+    wait_for_task_complete(sync_handle);
+
+    free_sync_owned_resources(sync_handle);
+    sync_handle = NULL;
+    return 0;
 }
 
 uint32_t os_transport_destroy(void* handle)
