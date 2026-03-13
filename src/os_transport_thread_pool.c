@@ -312,11 +312,11 @@ static void* async_poll_routine(void* arg) {
                 LOG_ERROR("Error opcode");
             }
             uint32_t request_id = user_data.bs.request_id;
-            LOG_DEBUG("asyncPoll received notification for request_id %lu", request_id);、
+            LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);、
             // 查找该 request_id 绑定的 worker
             RequestContext* ctx = find_req_context(pool, request_id);
             if (!ctx) {
-                LOG_WARN("No context found for request_id %lu", request_id);
+                LOG_WARN("No context found for request_id %u", request_id);
                 continue;
             }
             WorkerThread* worker = &pool->workers[ctx->worker_idx];
@@ -510,7 +510,7 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
         insert_req_context(handle, ctx);
     }
 
-    LOG_DEBUG("Task %lu (req=%lu) submitted to worker %d", task->task_id, request_id, worker->worker_idx);
+    LOG_DEBUG("Task %lu (req=%u) submitted to worker %d", task->task_id, request_id, worker->worker_idx);
     return task->task_id;
 }
 
@@ -603,7 +603,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         insert_req_context(handle, ctx);
     }
 
-    LOG_DEBUG("Batch of %u tasks (req=%lu) submitted to worker %d", task_count, req_id, worker_idx);
+    LOG_DEBUG("Batch of %u tasks (req=%u) submitted to worker %d", task_count, req_id, worker_idx);
     return task_ids;
 }
 
