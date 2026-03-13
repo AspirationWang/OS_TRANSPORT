@@ -12,6 +12,68 @@ typedef struct {
     void *task_args;
 } task_group_alloc_t;
 
+uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
+                                            struct chunk_info *chunks, uint64_t chunk_num,
+                                            task_type_t type, void (*task_func)(void *),
+                                            urma_info_t urma_info, task_sync_t **sync_handle);
+void wait_for_task_complete(task_sync_t* sync_handle);
+void construct_send_task_arg(send_task_arg_t* arg, urma_write_info_t write_info, struct chunk_info *chunk_info,
+                             uint64_t chunk_id, bool is_last_chunk, task_sync_t* sync);
+void construct_recv_task_arg(recv_task_arg_t *arg, urma_recv_info_t recv_info,
+                             struct chunk_info *chunk_info, bool is_last_chunk, task_sync_t *sync);
+ThreadPoolTask construct_worker_task(uint64_t task_id, uint32_t request_id,
+                                     void (*task_func)(void*), void* task_arg);
+
+static int alloc_task_group(task_group_alloc_t **alloc_out, uint64_t task_count, size_t task_arg_size)
+{
+    task_group_alloc_t *alloc = NULL;
+
+    if (!alloc_out || task_count == 0 || task_arg_size == 0) {
+        return -1;
+    }
+
+    alloc = calloc(1, sizeof(task_group_alloc_t));
+    if (!alloc) {
+        return -1;
+    }
+
+    alloc->tasks = calloc(task_count, sizeof(ThreadPoolTask));
+    alloc->task_args = calloc(task_count, task_arg_size);
+    if (!alloc->tasks || !alloc->task_args) {
+        free(alloc->task_args);
+        free(alloc->tasks);
+        free(alloc);
+        return -1;
+    }
+
+    *alloc_out = alloc;
+    return 0;
+}
+
+static int init_task_sync(task_sync_t **sync_out)
+{
+    task_sync_t *sync = NULL;
+
+    if (!sync_out) {
+        return -1;
+    }
+
+    sync = calloc(1, sizeof(task_sync_t));
+    if (!sync) {
+        return -1;
+    }
+    if (pthread_mutex_init(&sync->mutex, NULL) != 0 ||
+        pthread_cond_init(&sync->cond, NULL) != 0) {
+        pthread_mutex_destroy(&sync->mutex);
+        pthread_cond_destroy(&sync->cond);
+        free(sync);
+        return -1;
+    }
+
+    *sync_out = sync;
+    return 0;
+}
+
 static void free_task_group_alloc(task_sync_t *sync)
 {
     if (!sync || !sync->group_task_args) {
@@ -35,6 +97,133 @@ static void free_sync_owned_resources(task_sync_t *sync)
     pthread_mutex_destroy(&sync->mutex);
     pthread_cond_destroy(&sync->cond);
     free(sync);
+}
+
+static void mark_task_group_completed(task_sync_t *sync)
+{
+    if (!sync) {
+        return;
+    }
+
+    pthread_mutex_lock(&sync->mutex);
+    sync->completed_tasks++;
+    if (sync->completed_tasks == sync->total_tasks) {
+        sync->request_completed = 1;
+        pthread_cond_signal(&sync->cond);
+    }
+    pthread_mutex_unlock(&sync->mutex);
+}
+
+static int register_send_tasks(os_transport_handle_t *ost_handle, struct chunk_info *chunks,
+                               uint64_t chunk_num, void (*task_func)(void *),
+                               urma_info_t urma_info, task_sync_t *sync)
+{
+    uint64_t task_count = chunk_num - 1;
+    uint64_t *task_ids = NULL;
+    task_group_alloc_t *alloc = NULL;
+    send_task_arg_t *task_args = NULL;
+
+    if (chunk_num < 2) {
+        fprintf(stderr, "os_transport: chunk数量非法\n");
+        return -1;
+    }
+
+    if (alloc_task_group(&alloc, task_count, sizeof(send_task_arg_t)) != 0) {
+        fprintf(stderr, "os_transport: 内存分配失败\n");
+        return -1;
+    }
+    task_args = (send_task_arg_t*)alloc->task_args;
+
+    sync->total_tasks = task_count;
+    for (uint64_t i = 0; i < task_count; i++) {
+        uint64_t chunk_idx = i + 1;
+        bool is_last_chunk = (chunk_idx == chunk_num - 1);
+        uint32_t request_id = (uint32_t)(urma_info.write_info.user_ctx_server);
+
+        construct_send_task_arg(&task_args[i], urma_info.write_info, &chunks[chunk_idx], chunk_idx, is_last_chunk, sync);
+        alloc->tasks[i] = construct_worker_task(chunk_idx, request_id, task_func, &task_args[i]);
+    }
+
+    task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, task_count, NULL, NULL);
+    if (!task_ids) {
+        fprintf(stderr, "os_transport: 任务提交失败\n");
+        free(alloc->task_args);
+        free(alloc->tasks);
+        free(alloc);
+        return -1;
+    }
+
+    free(task_ids);
+    sync->group_task_args = alloc;
+    return 0;
+}
+
+static int register_recv_tasks(os_transport_handle_t *ost_handle, struct chunk_info *chunks,
+                               uint64_t chunk_num, void (*task_func)(void *),
+                               urma_info_t urma_info, task_sync_t *sync)
+{
+    uint64_t *task_ids = NULL;
+    task_group_alloc_t *alloc = NULL;
+    recv_task_arg_t *task_args = NULL;
+
+    if (alloc_task_group(&alloc, chunk_num, sizeof(recv_task_arg_t)) != 0) {
+        fprintf(stderr, "os_transport: 内存分配失败\n");
+        return -1;
+    }
+    task_args = (recv_task_arg_t*)alloc->task_args;
+
+    sync->total_tasks = chunk_num;
+    for (uint64_t i = 0; i < chunk_num; i++) {
+        bool is_last_chunk = (i == chunk_num - 1);
+        uint32_t request_id = (uint32_t)(urma_info.recv_info.request_id);
+        construct_recv_task_arg(&task_args[i], urma_info.recv_info, &chunks[i], is_last_chunk, sync);
+        alloc->tasks[i] = construct_worker_task(i, request_id, task_func, &task_args[i]);
+    }
+
+    task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, chunk_num, NULL, NULL);
+    if (!task_ids) {
+        fprintf(stderr, "os_transport: recv任务提交失败\n");
+        free(alloc->task_args);
+        free(alloc->tasks);
+        free(alloc);
+        return -1;
+    }
+
+    free(task_ids);
+    sync->group_task_args = alloc;
+    return 0;
+}
+
+static int register_tasks_and_bind_chunks(os_transport_handle_t *ost_handle,
+                                          struct chunk_info *chunks, uint64_t chunk_num,
+                                          task_type_t type, void (*task_func)(void *),
+                                          urma_info_t urma_info, task_sync_t **sync_handle)
+{
+    task_sync_t *sync = NULL;
+    int ret;
+
+    if (!sync_handle) {
+        return -1;
+    }
+
+    ret = construct_and_register_worker_task(
+        ost_handle, chunks, chunk_num, type, task_func, urma_info, &sync);
+    if (ret != 0) {
+        return -1;
+    }
+
+    sync->chunks = chunks;
+    *sync_handle = sync;
+    return 0;
+}
+
+static void wait_and_free_sync(task_sync_t *sync_handle)
+{
+    if (!sync_handle) {
+        return;
+    }
+    wait_for_task_complete(sync_handle);
+    free_sync_owned_resources(sync_handle);
 }
 
 uint32_t os_transport_init(urma_context_t* urma_ctx, os_transport_cfg_t* ost_cfg, void** handle)
@@ -174,124 +363,38 @@ uint32_t construct_and_register_worker_task(os_transport_handle_t *ost_handle,
                                             task_type_t type, void (*task_func)(void *),
                                             urma_info_t urma_info, task_sync_t **sync_handle)
 {
-    bool sync_inited = false;
-    task_sync_t* sync = NULL;
-    task_group_alloc_t *alloc = NULL;
-    uint64_t *task_ids = NULL;
+    task_sync_t *sync = NULL;
+    int ret = -1;
 
     if (!ost_handle || !chunks || !sync_handle || chunk_num == 0) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
-    }
-
+     }
     *sync_handle = NULL;
 
-    sync = malloc(sizeof(task_sync_t));
-    if (!sync) {
-        fprintf(stderr, "os_transport: 内存分配失败\n");
-        goto err_out;
-    }
-    memset(sync, 0, sizeof(*sync));
-    if (pthread_mutex_init(&sync->mutex, NULL) != 0 ||
-        pthread_cond_init(&sync->cond, NULL) != 0) {
+    if (init_task_sync(&sync) != 0) {
         fprintf(stderr, "os_transport: 同步对象初始化失败\n");
-        goto err_out;
+        return -1;
     }
-    sync_inited = true;
 
     if (type == SEND_TASK) {
-        if (chunk_num < 2) {
-            fprintf(stderr, "os_transport: chunk数量非法\n");
-            goto err_out;
-        }
-        // 只分配 chunk_num - 1 个 task（chunk[0] 由主线程发送）
-        uint64_t task_count = chunk_num - 1;
-        alloc = calloc(1, sizeof(task_group_alloc_t));
-        if (!alloc) {
-            fprintf(stderr, "os_transport: 内存分配失败\n");
-            goto err_out;
-        }
-        alloc->tasks = calloc(task_count, sizeof(ThreadPoolTask));
-        alloc->task_args = calloc(task_count, sizeof(send_task_arg_t));
-        if (!alloc->tasks || !alloc->task_args) {
-            fprintf(stderr, "os_transport: 内存分配失败\n");
-            goto err_out;
-        }
-        send_task_arg_t *task_args = (send_task_arg_t*)alloc->task_args;
-
-        sync->total_tasks = task_count;
-        // 从chunk[1]开始构造send类型的task并注册到线程池，chunk[0]由主线程发送
-        for (uint64_t i = 0; i < task_count; i++) {
-            uint64_t chunk_idx = i + 1; // 对应 chunks 数组中的索引
-            bool is_last_chunk = (chunk_idx == chunk_num - 1) ? true : false;
-            construct_send_task_arg(&task_args[i], urma_info.write_info, &chunks[chunk_idx], chunk_idx, is_last_chunk, sync);
-            uint32_t request_id = (uint32_t)(urma_info.write_info.user_ctx_server);
-            alloc->tasks[i] =
-                construct_worker_task(chunk_idx, request_id, task_func, &task_args[i]);
-        }
-        // 批量提交任务到线程池
-        task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, task_count, NULL, NULL);
-        if (!task_ids) {
-            fprintf(stderr, "os_transport: 任务提交失败\n");
-            goto err_out;
-        }
-        free(task_ids);
-        task_ids = NULL;
-        sync->group_task_args = alloc;
-        alloc = NULL;
+        ret = register_send_tasks(ost_handle, chunks, chunk_num, task_func, urma_info, sync);
     } else if (type == RECV_TASK) {
-        alloc = calloc(1, sizeof(task_group_alloc_t));
-        if (!alloc) {
-            fprintf(stderr, "os_transport: 内存分配失败\n");
-            goto err_out;
-        }
-        // recv类型的task数量等于chunk数量，因为每个chunk都需要一个recv任务来接收和H2D
-        alloc->tasks = calloc(chunk_num, sizeof(ThreadPoolTask));
-        alloc->task_args = calloc(chunk_num, sizeof(recv_task_arg_t));
-        if (!alloc->tasks || !alloc->task_args) {
-            fprintf(stderr, "os_transport: 内存分配失败\n");
-            goto err_out;
-        }
-        recv_task_arg_t *task_args = (recv_task_arg_t*)alloc->task_args;
-        sync->total_tasks = chunk_num;
-        for (uint64_t i = 0; i < chunk_num; i++) {
-            bool is_last_chunk = (i == chunk_num - 1);
-            construct_recv_task_arg(&task_args[i], urma_info.recv_info, &chunks[i], is_last_chunk, sync);
-            uint32_t request_id = (uint32_t)(urma_info.recv_info.request_id);
-            alloc->tasks[i] = construct_worker_task(i, request_id, task_func, &task_args[i]);
-        }
-        task_ids = thread_pool_submit_batch_tasks(ost_handle->thread_pool, alloc->tasks, chunk_num, NULL, NULL);
-        if (!task_ids) {
-            fprintf(stderr, "os_transport: recv任务提交失败\n");
-            goto err_out;
-        }
-        free(task_ids);
-        task_ids = NULL;
-        sync->group_task_args = alloc;
-        alloc = NULL;
+        ret = register_recv_tasks(ost_handle, chunks, chunk_num, task_func, urma_info, sync);
     } else {
         fprintf(stderr, "os_transport: 任务类型错误\n");
-        goto err_out;
+        ret = -1;
+    }
+
+    if (ret != 0) {
+        pthread_mutex_destroy(&sync->mutex);
+        pthread_cond_destroy(&sync->cond);
+        free(sync);
+        return -1;
     }
 
     *sync_handle = sync;
     return 0;
-
-err_out:
-    free(task_ids);
-    if (alloc) {
-        free(alloc->task_args);
-        free(alloc->tasks);
-        free(alloc);
-    }
-    if (sync) {
-        if (sync_inited) {
-            pthread_mutex_destroy(&sync->mutex);
-            pthread_cond_destroy(&sync->cond);
-        }
-        free(sync);
-    }
-    return -1;
 }
 
 void do_send_chunk_for_worker(urma_write_info_t write_info, struct chunk_info *chunk_info)
@@ -304,17 +407,7 @@ void send_task_worker_func(void* arg)
 {
     send_task_arg_t* send_task_arg = (send_task_arg_t*)arg;
     do_send_chunk_for_worker(send_task_arg->write_info, send_task_arg->chunk_info);
-    task_sync_t* sync = send_task_arg->sync ? send_task_arg->sync : NULL;
-    if (!sync) {
-        return;
-    }
-    pthread_mutex_lock(&sync->mutex);
-    sync->completed_tasks++;
-    if (sync->completed_tasks == sync->total_tasks) {
-        sync->request_completed = 1;
-        pthread_cond_signal(&sync->cond);
-    }
-    pthread_mutex_unlock(&sync->mutex);
+    mark_task_group_completed(send_task_arg->sync);
 }
 
 uint32_t common_split_chunks(uint64_t src_addr, uint64_t dst_addr, uint32_t len, struct chunk_info **ret_chunks, uint64_t *ret_chunk_num)
@@ -367,6 +460,66 @@ uint32_t recv_split_chunks(struct buffer_info *host, device_info_t *device, uint
     return common_split_chunks(src_addr, dst_addr, len, ret_chunks, ret_chunk_num);
 }
 
+static int validate_send_input(void *handle, struct urma_jetty_info *jetty_info,
+                               struct buffer_info *local_src, struct buffer_info *remote_dst,
+                               uint32_t len)
+{
+    if (!handle || !jetty_info || !local_src || !remote_dst || len == 0) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
+    if (!g_inited) {
+        fprintf(stderr, "os_transport: 未初始化\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int validate_recv_input(void *handle, struct buffer_info *host_src,
+                               device_info_t *device_dst, uint32_t len)
+{
+    if (!handle || !host_src || !device_dst || len == 0) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
+    if (!g_inited) {
+        fprintf(stderr, "os_transport: 未初始化\n");
+        return -1;
+    }
+    return 0;
+}
+
+static urma_write_info_t build_write_info(struct urma_jetty_info *jetty_info,
+                                          struct buffer_info *local_src,
+                                          struct buffer_info *remote_dst,
+                                          uint32_t server_key, uint32_t client_key)
+{
+    urma_write_info_t write_info = {
+        .jfs = jetty_info->jfs,
+        .jetty = jetty_info->jetty,
+        .target_jfr = jetty_info->tjetty,
+        .dst_tseg = remote_dst->tseg,
+        .src_tseg = local_src->tseg,
+        .flag = {0},
+        .user_ctx_server = server_key,
+        .user_ctx_client = client_key
+    };
+    return write_info;
+}
+
+static int send_single_chunk(struct urma_jetty_info *jetty_info,
+                             struct buffer_info *local_src, struct buffer_info *remote_dst,
+                             uint32_t len, uint32_t server_key, uint32_t client_key)
+{
+    urma_write_info_t write_info = build_write_info(jetty_info, local_src, remote_dst, server_key, client_key);
+    struct chunk_info chunk = {
+        .src = local_src[0].addr,
+        .dst = remote_dst[0].addr,
+        .len = len
+    };
+    return (urma_write_with_notify(write_info, &chunk) == URMA_SUCCESS) ? 0 : -1;
+}
+
 void wait_for_task_complete(task_sync_t* sync_handle)
 {
     if (!sync_handle) {
@@ -391,77 +544,40 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
                            struct buffer_info *local_src, struct buffer_info *remote_dst,
                            uint32_t len, uint32_t server_key, uint32_t client_key)
 {
-    if (!handle || !jetty_info || !local_src || !remote_dst || len == 0) {
-        fprintf(stderr, "os_transport: 参数非法\n");
-        return -1;
-    }
-    if (!g_inited) {
-        fprintf(stderr, "os_transport: 未初始化\n");
-        return -1;
-    }
-
+    urma_write_info_t write_info;
+    urma_info_t urma_info;
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
-    // 若源数据长度小于等于DEFAULT_CHUNK_SIZE，则直接发送；否则需要将数据拆分为多个chunk进行发送
-    if (len <= DEFAULT_CHUNK_SIZE) {
-        urma_write_info_t write_info = {
-            .jfs = jetty_info->jfs,
-            .jetty = jetty_info->jetty,
-            .target_jfr = jetty_info->tjetty,
-            .dst_tseg = remote_dst->tseg,
-            .src_tseg = local_src->tseg,
-            .flag = {0},
-            .user_ctx_server = server_key,
-            .user_ctx_client = client_key
-        };
-        struct chunk_info chunk = {
-            .src = local_src[0].addr,
-            .dst = remote_dst[0].addr,
-            .len = len
-        };
-        return (urma_write_with_notify(write_info, &chunk) == URMA_SUCCESS) ? 0 : -1;
+    struct chunk_info *chunks;
+    uint64_t chunks_num;
+    task_sync_t *sync_handle = NULL;
+
+    if (validate_send_input(handle, jetty_info, local_src, remote_dst, len) != 0) {
+        return -1;
     }
 
-    // 将源地址中的数据拆分为多个chunk，每个chunk的大小不超过DEFAULT_CHUNK_SIZE
-    struct chunk_info* chunks;
-    uint64_t chunks_num;
+    if (len <= DEFAULT_CHUNK_SIZE) {
+        return send_single_chunk(jetty_info, local_src, remote_dst, len, server_key, client_key);
+    }
+
     if (send_split_chunks(local_src, remote_dst, len, &chunks, &chunks_num) != 0) {
         return -1;
     }
 
-    urma_info_t urma_info;
-    // 构造send类型的task并注册，注意最后一个chunk的task需要负责唤醒os_transport_send的线程继续执行
-    urma_info.write_info = (urma_write_info_t){
-        .jfs = jetty_info->jfs,
-        .jetty = jetty_info->jetty,
-        .target_jfr = jetty_info->tjetty,
-        .dst_tseg = remote_dst->tseg, 
-        .src_tseg = local_src->tseg,
-        .flag = 0, // 根据实际情况设置flag
-        .user_ctx_server = server_key, // 可以将server_key作为user_ctx传入，后续在每个chunk中分别设置具体信息
-        .user_ctx_client = client_key
-    };
-
-    // 构造task并注册，注意最后一个chunk的task需要负责唤醒os_transport_send的线程继续执行
-    task_sync_t* sync_handle;
-    if (construct_and_register_worker_task(
+    write_info = build_write_info(jetty_info, local_src, remote_dst, server_key, client_key);
+    memset(&urma_info, 0, sizeof(urma_info));
+    urma_info.write_info = write_info;
+    if (register_tasks_and_bind_chunks(
             ost_handle, chunks, chunks_num, SEND_TASK, send_task_worker_func, urma_info, &sync_handle) != 0) {
         free(chunks);
         return -1;
     }
-    sync_handle->chunks = chunks;
 
-    // 手动发送第一个chunk
-    if (urma_write_with_notify(urma_info.write_info, &chunks[0]) != URMA_SUCCESS) {
-        wait_for_task_complete(sync_handle);
-        free_sync_owned_resources(sync_handle);
-        sync_handle = NULL;
+    if (urma_write_with_notify(write_info, &chunks[0]) != URMA_SUCCESS) {
+        wait_and_free_sync(sync_handle);
         return -1;
     }
 
-    wait_for_task_complete(sync_handle);
-
-    free_sync_owned_resources(sync_handle);
-    sync_handle = NULL;
+    wait_and_free_sync(sync_handle);
     return 0;
 }
 
@@ -475,17 +591,7 @@ void recv_task_worker_func(void* arg)
 {
     recv_task_arg_t* recv_task_arg = (recv_task_arg_t*)arg;
     do_recv_chunk_for_worker(recv_task_arg->recv_info);
-    task_sync_t* sync = recv_task_arg->sync ? recv_task_arg->sync : NULL;
-    if (!sync) {
-        return;
-    }
-    pthread_mutex_lock(&sync->mutex);
-    sync->completed_tasks++;
-    if (sync->completed_tasks == sync->total_tasks) {
-        sync->request_completed = 1;
-        pthread_cond_signal(&sync->cond);
-    }
-    pthread_mutex_unlock(&sync->mutex);
+    mark_task_group_completed(recv_task_arg->sync);
 }
 
 /*
@@ -496,38 +602,31 @@ void recv_task_worker_func(void* arg)
 uint32_t os_transport_recv(void* handle, struct buffer_info* host_src,
                            device_info_t *device_dst, uint32_t len, uint32_t client_key)
 {
-    if (!handle || !host_src || !device_dst) {
-        fprintf(stderr, "os_transport: 参数非法\n");
-        return -1;
-    }
-    if (!g_inited) {
-        fprintf(stderr, "os_transport: 未初始化\n");
-        return -1;
-    }
+    urma_info_t urma_info = {0};
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
-    struct chunk_info* chunks;
+    struct chunk_info *chunks;
     uint64_t chunks_num;
+    task_sync_t *sync_handle = NULL;
+
+    if (validate_recv_input(handle, host_src, device_dst, len) != 0) {
+        return -1;
+    }
+
     if (recv_split_chunks(host_src, device_dst, len, &chunks, &chunks_num) != 0) {
         return -1;
     }
 
-    urma_info_t urma_info = {0};
     urma_info.recv_info = (urma_recv_info_t){
         .device_info = *device_dst,
         .request_id = client_key
     };
-    task_sync_t* sync_handle;
-    if (construct_and_register_worker_task(
+    if (register_tasks_and_bind_chunks(
             ost_handle, chunks, chunks_num, RECV_TASK, recv_task_worker_func, urma_info, &sync_handle) != 0) {
         free(chunks);
         return -1;
     }
-    sync_handle->chunks = chunks;
 
-    wait_for_task_complete(sync_handle);
-
-    free_sync_owned_resources(sync_handle);
-    sync_handle = NULL;
+    wait_and_free_sync(sync_handle);
     return 0;
 }
 
