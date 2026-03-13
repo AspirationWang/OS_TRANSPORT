@@ -94,7 +94,7 @@ static ThreadPoolTask* worker_queue_pop_by_req(WorkerThread* worker, uint32_t re
             return task;
         }
     }
-    LOG_DEBUG("Worker %d no task found for req %lu", worker->worker_idx, req_id);
+    LOG_DEBUG("Worker %d no task found for req %u", worker->worker_idx, req_id);
     return NULL;
 }
 
@@ -255,7 +255,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         } else if (cnt < 0) {
             LOG_ERROR("Faided to poll jfc. cnt = %d.", cnt);
             return -1;
-        } else if (cnt > 0 && cnt <= cr_num) {
+        } else if (cnt > 0 && (uint32_t)cnt <= cr_num) {
             if (urma_event_mode) {
                 /* 事件模式 */
                 urma_ack_jfc(jfc, &ack_cnt, 1);
@@ -300,7 +300,7 @@ static void* async_poll_routine(void* arg) {
             continue;
         }
         for (int loop = 0; loop < cnt; loop++) {
-            TransportData user_data = 0;
+            TransportData user_data = { 0 };
             urma_cr_opcode_t opcode = cr[loop].opcode;
             if (opcode == URMA_CR_OPC_WRITE_WITH_IMM) {
                 LOG_DEBUG("Opcode is URMA_CR_OPC_WRITE_WITH_IMM");
