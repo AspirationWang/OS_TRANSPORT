@@ -11,7 +11,7 @@ static uint32_t hash_req_id(uint32_t req_id) {
 
 // 内部任务包装
 typedef struct {
-    void (*user_func)(void*);
+    int (*user_func)(void*);
     void* user_arg;
     TaskCompleteCb complete_cb;
     void* user_data;
