@@ -257,6 +257,7 @@ static void test_queue_expansion(ThreadPoolHandle pool) {
     // 发送所有通知
     for (int i = 0; i < LARGE_COUNT; i++) {
         mock_event_queue_push(large_req);
+        usleep(20000);
     }
 
     test_state_wait_completion();
