@@ -21,15 +21,16 @@ typedef struct {
 } InternalTask;
 
 // 任务包装函数
-static void internal_task_wrapper(void* arg) {
+static int internal_task_wrapper(void* arg) {
     InternalTask* itask = (InternalTask*)arg;
     LOG_DEBUG("Task %lu (req=%u) started", itask->task_id, itask->request_id);
-    itask->user_func(itask->user_arg);
+    int ret = itask->user_func(itask->user_arg);
     if (itask->complete_cb) {
         itask->complete_cb(itask->task_id, itask->success, itask->user_data);
     }
     LOG_DEBUG("Task %lu completed", itask->task_id);
     free(itask);
+    return ret;
 }
 
 // 生成唯一任务ID
