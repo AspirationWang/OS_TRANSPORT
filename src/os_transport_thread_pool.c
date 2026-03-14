@@ -295,19 +295,20 @@ static void* worker_routine(void* arg) {
 /* 绑定jfc，用来等待事件 */
 static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, uint32_t try_cnt, uint32_t cr_num)
 {
-#ifdef TEST_MODE
-    // 测试模式：从模拟队列中获取事件
+    #ifdef TEST_MODE
     uint64_t req_id;
     int cnt = 0;
     while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
-        cr[cnt].opcode = URMA_CR_OPC_SEND;   // 使用 SEND 类型，user_ctx 携带 request_id
+        TransportData td = {0};
+        td.bs.request_id = req_id;   // 将 request_id 填入联合体的 request_id 字段
+        cr[cnt].opcode = URMA_CR_OPC_SEND;
         cr[cnt].status = URMA_SUCCESS;
-        cr[cnt].user_ctx = req_id;
+        cr[cnt].user_ctx = td.user_ctx;   // 将联合体的值赋给 user_ctx
         cr[cnt].imm_data = 0;
         cnt++;
     }
     return cnt;
-#else
+#endif
     bool urma_event_mode = pool->urmaInfo.urma_event_mode;
     urma_jfce_t *jfce = pool->urmaInfo.jfce;
     urma_jfc_t *jfc = pool->urmaInfo.jfc;
