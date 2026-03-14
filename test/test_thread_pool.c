@@ -1,33 +1,37 @@
 /*
-* test_thread_pool.c - 线程池单元测试
-* 编译命令：
-*   gcc -g -o test_thread_pool os_transport_thread_pool.c test_thread_pool.c -lpthread -I. -D_GNU_SOURCE
+* test_thread_pool.c - 线程池单元测试（模拟URMA）
 *
-* 注意：需要提供模拟的URMA函数，本文件中已实现模拟。
+* 编译命令：
+*   gcc -g -o test_thread_pool os_transport_thread_pool.c test_thread_pool.c -lpthread -I.
 */
 
-#define _GNU_SOURCE
+#include "os_transport_thread_pool.h"
+#include "os_transport_thread_pool_internal.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
-#include <errno.h>
-#include "os_transport_urma.h"
-#include "os_transport_thread_pool_internal.h"
-#include "os_transport_thread_pool.h"
 
-/* 模拟URMA函数声明 */
-int urma_wait_jfc(urma_jfce_t *jfce, int num, int timeout, urma_jfc_t **ev_jfc);
-int urma_poll_jfc(urma_jfc_t *jfc, uint32_t cr_num, urma_cr_t *cr);
-void urma_ack_jfc(urma_jfc_t **jfc, uint32_t *ack_cnt, int num);
-urma_status_t urma_rearm_jfc(urma_jfc_t *jfc, int flag);
+/* ---------- 模拟URMA类型和函数 ---------- */
+typedef enum { URMA_SUCCESS = 0 } urma_status_t;
+typedef struct urma_jfce { int dummy; } urma_jfce_t;
+typedef struct urma_jfc { int dummy; } urma_jfc_t;
+typedef int urma_cr_opcode_t;
+#define URMA_CR_OPC_WRITE_WITH_IMM 1
+#define URMA_CR_OPC_SEND 2
 
-/* 模拟事件队列，用于控制urma_poll_jfc返回的事件 */
+typedef struct urma_cr {
+    urma_cr_opcode_t opcode;
+    urma_status_t status;
+    uint64_t imm_data;
+    uint64_t user_ctx;
+} urma_cr_t;
+
+/* 模拟事件队列 */
 typedef struct {
-    uint64_t *events;          // 存放 user_ctx 或 imm_data（实际存 request_id）
+    uint64_t *events;   // 存放 request_id
     uint32_t cap;
     uint32_t head;
     uint32_t tail;
@@ -46,10 +50,9 @@ void mock_event_queue_init(uint32_t cap) {
     pthread_cond_init(&g_mock_queue.cond, NULL);
 }
 
-void mock_event_queue_push(uint64_t request_id) {
+void mock_event_queue_push(uint64_t req_id) {
     pthread_mutex_lock(&g_mock_queue.lock);
     if (g_mock_queue.size >= g_mock_queue.cap) {
-        // 扩容
         uint32_t new_cap = g_mock_queue.cap * 2;
         uint64_t *new_events = malloc(new_cap * sizeof(uint64_t));
         for (uint32_t i = 0; i < g_mock_queue.size; i++) {
@@ -61,14 +64,13 @@ void mock_event_queue_push(uint64_t request_id) {
         g_mock_queue.head = 0;
         g_mock_queue.tail = g_mock_queue.size;
     }
-    g_mock_queue.events[g_mock_queue.tail] = request_id;
+    g_mock_queue.events[g_mock_queue.tail] = req_id;
     g_mock_queue.tail = (g_mock_queue.tail + 1) % g_mock_queue.cap;
     g_mock_queue.size++;
     pthread_cond_signal(&g_mock_queue.cond);
     pthread_mutex_unlock(&g_mock_queue.lock);
 }
 
-/* 从队列中取一个事件，返回0表示无事件 */
 static int mock_event_queue_pop(uint64_t *req_id) {
     pthread_mutex_lock(&g_mock_queue.lock);
     if (g_mock_queue.size == 0) {
@@ -88,29 +90,20 @@ void mock_event_queue_destroy(void) {
     pthread_cond_destroy(&g_mock_queue.cond);
 }
 
-/* 模拟URMA函数实现 */
+/* 模拟URMA函数（只实现必要部分） */
 int urma_wait_jfc(urma_jfce_t *jfce, int num, int timeout, urma_jfc_t **ev_jfc) {
-    (void)jfce; (void)num; (void)timeout;
-    // 模拟：如果事件队列非空，返回1并设置ev_jfc为某个非空指针
-    pthread_mutex_lock(&g_mock_queue.lock);
-    int has_event = (g_mock_queue.size > 0) ? 1 : 0;
-    pthread_mutex_unlock(&g_mock_queue.lock);
-    if (has_event) {
-        *ev_jfc = (urma_jfc_t*)0x1234; // 任意非空指针
-        return 1;
-    }
-    return 0;
+    (void)jfce; (void)num; (void)timeout; (void)ev_jfc;
+    return 0; // 非事件模式，直接返回0
 }
 
 int urma_poll_jfc(urma_jfc_t *jfc, uint32_t cr_num, urma_cr_t *cr) {
     (void)jfc;
-    // 从事件队列中取出最多 cr_num 个事件
     uint64_t req_id;
     int cnt = 0;
     while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
-        cr[cnt].opcode = URMA_CR_OPC_SEND;      // 使用 SEND 类型，user_ctx 携带 request_id
+        cr[cnt].opcode = URMA_CR_OPC_SEND;
         cr[cnt].status = URMA_SUCCESS;
-        cr[cnt].user_ctx = req_id;               // request_id 放入 user_ctx
+        cr[cnt].user_ctx = req_id;   // request_id 放入 user_ctx
         cr[cnt].imm_data = 0;
         cnt++;
     }
@@ -119,7 +112,6 @@ int urma_poll_jfc(urma_jfc_t *jfc, uint32_t cr_num, urma_cr_t *cr) {
 
 void urma_ack_jfc(urma_jfc_t **jfc, uint32_t *ack_cnt, int num) {
     (void)jfc; (void)ack_cnt; (void)num;
-    // 模拟空操作
 }
 
 urma_status_t urma_rearm_jfc(urma_jfc_t *jfc, int flag) {
@@ -127,19 +119,15 @@ urma_status_t urma_rearm_jfc(urma_jfc_t *jfc, int flag) {
     return URMA_SUCCESS;
 }
 
-/* 包含线程池头文件（必须放在模拟定义之后） */
-#include "os_transport_thread_pool.h"
-#include "os_transport_thread_pool_internal.h"
-
-/* 测试全局状态 */
+/* ---------- 测试状态 ---------- */
 typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t cond;
     int completed_count;          // 单个任务完成计数
     int batch_completed_count;     // 批次完成计数
-    int *exec_order;               // 记录每个任务执行的序号（按完成顺序）
+    int *exec_order;               // 记录每个任务执行的序号
     int exec_index;
-    int total_tasks;               // 预期总任务数
+    int total_tasks;
 } TestState;
 
 static TestState g_state = {0};
@@ -171,7 +159,7 @@ static void test_state_wait_batch(int expected_batches) {
     pthread_mutex_unlock(&g_state.lock);
 }
 
-/* 任务函数：记录执行顺序并释放参数 */
+/* 任务函数：记录执行顺序 */
 static void test_task(void *arg) {
     int seq = *(int *)arg;
     printf("Executing task seq %d in thread %lu\n", seq, (unsigned long)pthread_self());
@@ -180,7 +168,7 @@ static void test_task(void *arg) {
     g_state.exec_order[g_state.exec_index++] = seq;
     pthread_mutex_unlock(&g_state.lock);
 
-    free(arg); // 释放序号内存
+    free(arg);
 }
 
 /* 单个任务完成回调 */
@@ -204,9 +192,11 @@ static void batch_complete_cb(uint64_t task_id, bool success, void *user_data) {
     pthread_mutex_unlock(&g_state.lock);
 }
 
-/* 测试1：单个任务提交与执行 */
+/* ---------- 测试用例 ---------- */
+
+/* 测试1：单个任务 */
 static void test_single_tasks(ThreadPoolHandle pool) {
-    printf("\n=== Test 1: Single tasks with different request_ids ===\n");
+    printf("\n=== Test 1: Single tasks ===\n");
     test_state_init(2);
     uint32_t req1 = 1001, req2 = 1002;
     int *arg1 = malloc(sizeof(int)); *arg1 = 1;
@@ -216,7 +206,7 @@ static void test_single_tasks(ThreadPoolHandle pool) {
     uint64_t id2 = thread_pool_submit_task(pool, req2, test_task, arg2, test_complete_cb, NULL);
     assert(id1 != 0 && id2 != 0);
 
-    // 发送通知（模拟urma事件）
+    // 模拟事件
     mock_event_queue_push(req1);
     mock_event_queue_push(req2);
 
@@ -225,9 +215,9 @@ static void test_single_tasks(ThreadPoolHandle pool) {
     printf("Test 1 passed.\n");
 }
 
-/* 测试2：批量任务提交，验证顺序和批次回调 */
+/* 测试2：批量任务 */
 static void test_batch_tasks(ThreadPoolHandle pool) {
-    printf("\n=== Test 2: Batch tasks with same request_id ===\n");
+    printf("\n=== Test 2: Batch tasks ===\n");
     const int BATCH_COUNT = 5;
     uint32_t batch_req = 2001;
     ThreadPoolTask batch_tasks[BATCH_COUNT];
@@ -236,11 +226,11 @@ static void test_batch_tasks(ThreadPoolHandle pool) {
     test_state_init(BATCH_COUNT);
     for (int i = 0; i < BATCH_COUNT; i++) {
         args[i] = malloc(sizeof(int));
-        *args[i] = i + 10; // 序号从10开始
+        *args[i] = i + 10;
         batch_tasks[i].request_id = batch_req;
         batch_tasks[i].task_func = test_task;
         batch_tasks[i].task_arg = args[i];
-        batch_tasks[i].free_task_self = false; // 未使用
+        batch_tasks[i].free_task_self = false;
     }
 
     uint64_t *task_ids = thread_pool_submit_batch_tasks(pool, batch_tasks, BATCH_COUNT,
@@ -249,30 +239,22 @@ static void test_batch_tasks(ThreadPoolHandle pool) {
     assert(task_ids != NULL);
     free(task_ids);
 
-    // 逐个发送通知，每个通知只执行一个任务
     for (int i = 0; i < BATCH_COUNT; i++) {
         mock_event_queue_push(batch_req);
-        usleep(20000); // 短暂等待，让asyncPoll处理
+        usleep(20000);
     }
 
     test_state_wait_completion();
     test_state_wait_batch(1);
-
-    // 验证执行顺序
-    printf("Execution order: ");
-    for (int i = 0; i < BATCH_COUNT; i++) {
-        printf("%d ", g_state.exec_order[i]);
-    }
-    printf("\n");
     for (int i = 0; i < BATCH_COUNT; i++) {
         assert(g_state.exec_order[i] == 10 + i);
     }
     printf("Test 2 passed.\n");
 }
 
-/* 测试3：多个不同request_id交错通知 */
-static void test_interleaved_notifications(ThreadPoolHandle pool) {
-    printf("\n=== Test 3: Interleaved notifications for different request_ids ===\n");
+/* 测试3：交错通知 */
+static void test_interleaved(ThreadPoolHandle pool) {
+    printf("\n=== Test 3: Interleaved notifications ===\n");
     const int TASKS_PER_REQ = 3;
     uint32_t req_a = 3001, req_b = 3002;
     ThreadPoolTask tasks_a[TASKS_PER_REQ];
@@ -304,36 +286,26 @@ static void test_interleaved_notifications(ThreadPoolHandle pool) {
     assert(ids_a && ids_b);
     free(ids_a); free(ids_b);
 
-    // 交错发送通知：A, B, A, B, A, B
-    mock_event_queue_push(req_a);
-    usleep(20000);
-    mock_event_queue_push(req_b);
-    usleep(20000);
-    mock_event_queue_push(req_a);
-    usleep(20000);
-    mock_event_queue_push(req_b);
-    usleep(20000);
-    mock_event_queue_push(req_a);
-    usleep(20000);
-    mock_event_queue_push(req_b);
-    usleep(20000);
+    // 交错发送
+    mock_event_queue_push(req_a); usleep(20000);
+    mock_event_queue_push(req_b); usleep(20000);
+    mock_event_queue_push(req_a); usleep(20000);
+    mock_event_queue_push(req_b); usleep(20000);
+    mock_event_queue_push(req_a); usleep(20000);
+    mock_event_queue_push(req_b); usleep(20000);
 
     test_state_wait_completion();
     test_state_wait_batch(2);
 
     // 验证每个request_id内部顺序
-    int exec_a[TASKS_PER_REQ] = {0};
-    int exec_b[TASKS_PER_REQ] = {0};
-    int count_a = 0, count_b = 0;
+    int exec_a[TASKS_PER_REQ] = {0}, exec_b[TASKS_PER_REQ] = {0};
+    int ca = 0, cb = 0;
     for (int i = 0; i < g_state.exec_index; i++) {
-        int val = g_state.exec_order[i];
-        if (val >= 100 && val < 200) {
-            exec_a[count_a++] = val;
-        } else if (val >= 200 && val < 300) {
-            exec_b[count_b++] = val;
-        }
+        int v = g_state.exec_order[i];
+        if (v >= 100 && v < 200) exec_a[ca++] = v;
+        else if (v >= 200 && v < 300) exec_b[cb++] = v;
     }
-    assert(count_a == TASKS_PER_REQ && count_b == TASKS_PER_REQ);
+    assert(ca == TASKS_PER_REQ && cb == TASKS_PER_REQ);
     for (int i = 0; i < TASKS_PER_REQ; i++) {
         assert(exec_a[i] == 100 + i);
         assert(exec_b[i] == 200 + i);
@@ -341,9 +313,9 @@ static void test_interleaved_notifications(ThreadPoolHandle pool) {
     printf("Test 3 passed.\n");
 }
 
-/* 测试4：队列扩容（提交大量任务） */
+/* 测试4：队列扩容 */
 static void test_queue_expansion(ThreadPoolHandle pool) {
-    printf("\n=== Test 4: Queue expansion (many tasks) ===\n");
+    printf("\n=== Test 4: Queue expansion ===\n");
     const int LARGE_COUNT = 100;
     uint32_t large_req = 4001;
     ThreadPoolTask large_tasks[LARGE_COUNT];
@@ -364,7 +336,6 @@ static void test_queue_expansion(ThreadPoolHandle pool) {
     assert(task_ids != NULL);
     free(task_ids);
 
-    // 发送所有通知
     for (int i = 0; i < LARGE_COUNT; i++) {
         mock_event_queue_push(large_req);
     }
@@ -374,50 +345,39 @@ static void test_queue_expansion(ThreadPoolHandle pool) {
     printf("Test 4 passed (all %d tasks completed).\n", LARGE_COUNT);
 }
 
-/* 测试5：销毁线程池（确保资源释放） */
-static void test_destroy(ThreadPoolHandle pool) {
-    printf("\n=== Test 5: Destroy thread pool ===\n");
-    thread_pool_destroy(pool);
-    printf("Thread pool destroyed.\n");
-}
-
+/* ---------- 主函数 ---------- */
 int main(void) {
-    printf("Starting thread pool unit tests...\n");
+    printf("Starting thread pool tests (with URMA simulation)...\n");
 
-    // 初始化模拟事件队列
     mock_event_queue_init(64);
 
     // 初始化线程池（worker队列容量设为2以测试扩容）
     ThreadPoolHandle pool = thread_pool_init(2, 0);
     assert(pool != NULL);
 
-    // 设置URMA信息（模拟，实际可留空，但代码中会使用，所以需要提供非空指针以通过检查）
-    // 注意：async_poll_routine_wait_poll 中会检查 pool->urmaInfo.jfce 和 urma_event_mode
-    // 为避免错误，我们设置合理的模拟值
-    pool->urmaInfo.jfce = (urma_jfce_t*)0x1234;  // 任意非空指针
-    pool->urmaInfo.jfc = (urma_jfc_t*)0x5678;
-    pool->urmaInfo.urma_event_mode = false;      // 先使用非事件模式，简化
+    // 设置URMA信息（必须提供非空指针以避免空指针检查）
+    static urma_jfce_t dummy_jfce;
+    static urma_jfc_t dummy_jfc;
+    pool->urmaInfo.jfce = &dummy_jfce;
+    pool->urmaInfo.jfc = &dummy_jfc;
+    pool->urmaInfo.urma_event_mode = false;  // 使用轮询模式
 
-    // 启动线程池
     int ret = thread_pool_start(pool);
     assert(ret == 0);
     printf("Thread pool started.\n");
 
-    // 运行测试
     test_single_tasks(pool);
     test_batch_tasks(pool);
-    test_interleaved_notifications(pool);
+    test_interleaved(pool);
     test_queue_expansion(pool);
-    test_destroy(pool);
 
-    // 清理模拟事件队列
+    thread_pool_destroy(pool);
     mock_event_queue_destroy();
 
-    // 清理测试状态
     free(g_state.exec_order);
     pthread_mutex_destroy(&g_state.lock);
     pthread_cond_destroy(&g_state.cond);
 
-    printf("\nAll tests passed successfully!\n");
+    printf("\nAll tests passed!\n");
     return 0;
 }
