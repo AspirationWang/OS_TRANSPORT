@@ -377,9 +377,7 @@ static void* async_poll_routine(void* arg) {
     pthread_mutex_unlock(&pool->start_mutex);
 
     while (!pool->is_destroying) {
-        LOG_DEBUG("async_poll_routine looping");
         int cnt = async_poll_routine_wait_poll(pool, cr, POLL_TRY_CNT, POLL_SIZE);
-        LOG_DEBUG("async_poll_routine_wait_poll cnt = %d.", cnt);
         if (cnt < 0) {
             LOG_ERROR("Failed to run wait poll");
             break;
