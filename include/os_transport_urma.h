@@ -30,7 +30,6 @@ typedef struct {
 
 typedef struct {
     void *dst;             // 设备地址
-    uint32_t len;          // 数据长度
     cudaStream_t stream;   // CUDA流
 } device_info_t;
 
