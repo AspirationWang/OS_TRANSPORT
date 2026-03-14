@@ -52,19 +52,22 @@ typedef enum {
 } task_type_t;
 
 typedef struct {
+    ThreadPoolTask *tasks;
+    void *task_args;
+    uint32_t task_num;
+} task_group_t;
+
+typedef struct {
     pthread_mutex_t mutex;
     pthread_cond_t cond;
-    int request_completed;   // 该请求的所有task是否都已完成
-    uint64_t total_tasks;    // 任务组总任务数
-    uint64_t completed_tasks;// 任务组已完成任务数
-    void *group_task_args;   // 任务组参数块，由主线程统一释放
-    struct chunk_info *chunks; // 本次请求关联的chunk数组，由主线程统一释放
+    int request_completed;           // 该请求的所有task是否都已完成
+    uint64_t total_tasks;            // 任务组总任务数
+    uint64_t completed_tasks;        // 任务组已完成任务数
+    task_group_t *group_task_args;   // 任务组，由主线程统一释放
+    struct chunk_info *chunks;       // 本次请求关联的chunk数组，由主线程统一释放
 } task_sync_t;
 
-// send类型的task参数，包括：
-// 1. urma_write相关参数
-// 2. 与主函数的同步信息
-// 3. 发送chunk的相关参数，例如：chunk_id，是否为最后一个chunk等
+// send类型的task参数
 typedef struct {
     // 与主函数的同步信息
     task_sync_t *sync;
@@ -98,11 +101,13 @@ uint32_t os_transport_reg_jfc(urma_jfce_t *jfce, urma_jfc_t *jfc, void *handle);
 
 uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
                            struct buffer_info *local_src, struct buffer_info *remote_dst,
-                           uint32_t len, uint32_t server_key, uint32_t client_key);
+                           uint32_t len, uint32_t server_key, uint32_t client_key,
+                           task_sync_t **ret_sync_handle);
 
-uint32_t os_transport_recv(void *handle, struct buffer_info *host_src,
-                           device_info_t *device_dst, uint32_t len,
-                           uint32_t client_key);
+uint32_t os_transport_recv(void *handle, struct buffer_info *host_src, device_info_t *device_dst,
+                           uint32_t len, uint32_t client_key, task_sync_t **ret_sync_handle);
+
+uint32_t wait_and_free_sync(task_sync_t *sync_handle);
 
 uint32_t os_transport_destroy(void *handle);
 
