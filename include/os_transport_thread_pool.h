@@ -55,7 +55,7 @@ int thread_pool_start(ThreadPoolHandle handle);
  */
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                  uint32_t request_id,
-                                 void (*task_func)(void* arg),
+                                 int (*task_func)(void* arg),
                                  void* task_arg,
                                  TaskCompleteCb complete_cb,
                                  void* user_data);

@@ -453,7 +453,7 @@ int thread_pool_start(ThreadPoolHandle handle) {
 
 // 单任务提交
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
-                                        void (*task_func)(void*), void* task_arg,
+                                        int (*task_func)(void*), void* task_arg,
                                         TaskCompleteCb complete_cb, void* user_data) {
     if (!handle || !task_func || !handle->is_running) return 0;
 
