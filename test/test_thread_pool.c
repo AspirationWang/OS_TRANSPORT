@@ -15,25 +15,9 @@
 #include <assert.h>
 #include <pthread.h>
 #include <errno.h>
-
-/* 模拟URMA类型和常量 */
-typedef enum {
-    URMA_SUCCESS = 0,
-    URMA_CR_OPC_WRITE_WITH_IMM = 1,
-    URMA_CR_OPC_SEND = 2
-} urma_status_t;
-
-typedef struct urma_jfce {} urma_jfce_t;
-typedef struct urma_jfc {} urma_jfc_t;
-
-typedef int urma_cr_opcode_t; /* 简化 */
-
-typedef struct urma_cr {
-    urma_cr_opcode_t opcode;
-    urma_status_t status;
-    uint64_t imm_data;
-    uint64_t user_ctx;
-} urma_cr_t;
+#include "os_transport_urma.h"
+#include "os_transport_thread_pool_internal.h"
+#include "os_transport_thread_pool.h"
 
 /* 模拟URMA函数声明 */
 int urma_wait_jfc(urma_jfce_t *jfce, int num, int timeout, urma_jfc_t **ev_jfc);
