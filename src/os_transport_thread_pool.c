@@ -11,7 +11,7 @@ static uint32_t hash_req_id(uint32_t req_id) {
 
 // 内部任务包装
 typedef struct {
-    void (*user_func)(void*);
+    int (*user_func)(void*);
     void* user_arg;
     TaskCompleteCb complete_cb;
     void* user_data;
@@ -21,15 +21,16 @@ typedef struct {
 } InternalTask;
 
 // 任务包装函数
-static void internal_task_wrapper(void* arg) {
+static int internal_task_wrapper(void* arg) {
     InternalTask* itask = (InternalTask*)arg;
     LOG_DEBUG("Task %lu (req=%u) started", itask->task_id, itask->request_id);
-    itask->user_func(itask->user_arg);
+    int ret = itask->user_func(itask->user_arg);
     if (itask->complete_cb) {
         itask->complete_cb(itask->task_id, itask->success, itask->user_data);
     }
     LOG_DEBUG("Task %lu completed", itask->task_id);
     free(itask);
+    return ret;
 }
 
 // 生成唯一任务ID
@@ -452,7 +453,7 @@ int thread_pool_start(ThreadPoolHandle handle) {
 
 // 单任务提交
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
-                                        void (*task_func)(void*), void* task_arg,
+                                        int (*task_func)(void*), void* task_arg,
                                         TaskCompleteCb complete_cb, void* user_data) {
     if (!handle || !task_func || !handle->is_running) return 0;
 

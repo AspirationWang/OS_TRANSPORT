@@ -10,7 +10,7 @@
 typedef struct {
     uint64_t task_id;                 // 唯一任务ID
     uint32_t request_id;              // 请求ID（相同批次任务此值相同）
-    int (*task_func)(void* arg);     // 任务执行函数
+    int (*task_func)(void* arg);      // 任务执行函数
     void* task_arg;                   // 任务参数（用户自行管理内存）
     bool is_completed;                // 任务完成标记
     bool free_task_self;              // 任务结构体是否由线程池释放
@@ -55,7 +55,7 @@ int thread_pool_start(ThreadPoolHandle handle);
  */
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle,
                                  uint32_t request_id,
-                                 void (*task_func)(void* arg),
+                                 int (*task_func)(void* arg),
                                  void* task_arg,
                                  TaskCompleteCb complete_cb,
                                  void* user_data);
