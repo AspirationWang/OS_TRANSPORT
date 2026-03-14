@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 project(OS_TRANSPORT VERSION 1.0.0 LANGUAGES C)
+option(OS_TRANSPORT_BUILD_TESTS "Build OS_TRANSPORT test binaries" OFF)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -45,6 +46,8 @@ install(
     COMPONENT devel
 )
 
-# 编译测试程序
-add_executable(test_thread_pool test/test_thread_pool.c)
-target_link_libraries(test_thread_pool os_transport pthread)
+if(OS_TRANSPORT_BUILD_TESTS)
+    # 编译测试程序
+    add_executable(test_thread_pool test/test_thread_pool.c)
+    target_link_libraries(test_thread_pool os_transport pthread)
+endif()

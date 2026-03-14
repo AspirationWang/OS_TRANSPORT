@@ -2,12 +2,7 @@
 #define OS_TRANSPORT_THREAD_POOL_INTERNAL_H
 
 #include "os_transport_thread_pool.h"
-#include "urma_api.h"
-#include "urma_cmd.h"
-#include "urma_opcode.h"
-#include "urma_provider.h"
-#include "urma_types_str.h"
-#include "urma_types.h"
+#include "os_transport_urma.h"
 #include <pthread.h>
 #include <stdint.h>
 #include <stdbool.h>
