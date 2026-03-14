@@ -35,5 +35,5 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_
     };
     urma_jfs_wr_t *bad_wr;
 
-    return urma_post_jetty_send_wr(write_info.jetty, &wr, &bad_wr);
+    return 0;
 }
