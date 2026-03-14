@@ -4,6 +4,75 @@
 #include <string.h>
 #include <errno.h>
 
+#define TEST_MODE
+
+#ifdef TEST_MODE
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+// 模拟事件队列（用于测试）
+typedef struct {
+    uint64_t *events;
+    uint32_t cap;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t size;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} MockEventQueue;
+
+static MockEventQueue g_mock_queue = {0};
+
+void mock_event_queue_init(uint32_t cap) {
+    g_mock_queue.events = malloc(cap * sizeof(uint64_t));
+    g_mock_queue.cap = cap;
+    g_mock_queue.head = g_mock_queue.tail = g_mock_queue.size = 0;
+    pthread_mutex_init(&g_mock_queue.lock, NULL);
+    pthread_cond_init(&g_mock_queue.cond, NULL);
+}
+
+void mock_event_queue_push(uint64_t req_id) {
+    pthread_mutex_lock(&g_mock_queue.lock);
+    if (g_mock_queue.size >= g_mock_queue.cap) {
+        uint32_t new_cap = g_mock_queue.cap * 2;
+        uint64_t *new_events = malloc(new_cap * sizeof(uint64_t));
+        for (uint32_t i = 0; i < g_mock_queue.size; i++) {
+            new_events[i] = g_mock_queue.events[(g_mock_queue.head + i) % g_mock_queue.cap];
+        }
+        free(g_mock_queue.events);
+        g_mock_queue.events = new_events;
+        g_mock_queue.cap = new_cap;
+        g_mock_queue.head = 0;
+        g_mock_queue.tail = g_mock_queue.size;
+    }
+    g_mock_queue.events[g_mock_queue.tail] = req_id;
+    g_mock_queue.tail = (g_mock_queue.tail + 1) % g_mock_queue.cap;
+    g_mock_queue.size++;
+    pthread_cond_signal(&g_mock_queue.cond);
+    pthread_mutex_unlock(&g_mock_queue.lock);
+}
+
+static int mock_event_queue_pop(uint64_t *req_id) {
+    pthread_mutex_lock(&g_mock_queue.lock);
+    if (g_mock_queue.size == 0) {
+        pthread_mutex_unlock(&g_mock_queue.lock);
+        return 0;
+    }
+    *req_id = g_mock_queue.events[g_mock_queue.head];
+    g_mock_queue.head = (g_mock_queue.head + 1) % g_mock_queue.cap;
+    g_mock_queue.size--;
+    pthread_mutex_unlock(&g_mock_queue.lock);
+    return 1;
+}
+
+void mock_event_queue_destroy(void) {
+    free(g_mock_queue.events);
+    pthread_mutex_destroy(&g_mock_queue.lock);
+    pthread_cond_destroy(&g_mock_queue.cond);
+}
+#endif
+
 // 哈希函数
 static uint32_t hash_req_id(uint32_t req_id) {
     return (uint32_t)(req_id ^ (req_id >> 20)) % REQ_HASH_SIZE;
@@ -226,6 +295,19 @@ static void* worker_routine(void* arg) {
 /* 绑定jfc，用来等待事件 */
 static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, uint32_t try_cnt, uint32_t cr_num)
 {
+#ifdef TEST_MODE
+    // 测试模式：从模拟队列中获取事件
+    uint64_t req_id;
+    int cnt = 0;
+    while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
+        cr[cnt].opcode = URMA_CR_OPC_SEND;   // 使用 SEND 类型，user_ctx 携带 request_id
+        cr[cnt].status = URMA_SUCCESS;
+        cr[cnt].user_ctx = req_id;
+        cr[cnt].imm_data = 0;
+        cnt++;
+    }
+    return cnt;
+#else
     bool urma_event_mode = pool->urmaInfo.urma_event_mode;
     urma_jfce_t *jfce = pool->urmaInfo.jfce;
     urma_jfc_t *jfc = pool->urmaInfo.jfc;
@@ -275,6 +357,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         }
     }
     return cnt;
+#endif
 }
 
 // asyncPoll 线程主函数
