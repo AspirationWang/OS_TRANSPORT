@@ -295,7 +295,7 @@ static void* worker_routine(void* arg) {
 /* 绑定jfc，用来等待事件 */
 static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, uint32_t try_cnt, uint32_t cr_num)
 {
-    #ifdef TEST_MODE
+#ifdef TEST_MODE
     uint64_t req_id;
     int cnt = 0;
     while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
@@ -308,7 +308,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         cnt++;
     }
     return cnt;
-#endif
+#else
     bool urma_event_mode = pool->urmaInfo.urma_event_mode;
     urma_jfce_t *jfce = pool->urmaInfo.jfce;
     urma_jfc_t *jfc = pool->urmaInfo.jfc;
