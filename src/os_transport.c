@@ -100,7 +100,11 @@ uint32_t wait_for_task_complete(task_sync_t *sync_handle)
     }
     pthread_mutex_unlock(&sync_handle->mutex);
     task_group_t *task_group = sync_handle->group_task_args;
-    for(uint32_t i = 0; i < task_group->task_num; i++) {
+    if (!task_group) {
+        fprintf(stderr, "os_transport: 任务组信息缺失\n");
+        return -1;
+    }
+    for (uint64_t i = 0; i < task_group->task_num; i++) {
         if (!task_group->tasks[i].is_completed) {
             fprintf(stderr, "os_transport: 任务未完成\n");
             return -1;
@@ -614,10 +618,9 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     }
     if (urma_write_with_notify(write_info, &chunks[0]) != URMA_SUCCESS) {
         // TODO：如果第一个chunk发送失败，应该取消后续任务的执行，并释放资源
-        free(chunks);
+        wait_and_free_sync(sync_handle);
         return -1;
     }
-    free(chunks);
     if (ret_sync_handle) {
         *ret_sync_handle = sync_handle;
     }
@@ -633,6 +636,11 @@ uint32_t os_transport_recv(void *handle, struct buffer_info *host_src, device_in
     struct chunk_info *chunks;
     uint64_t chunks_num;
     task_sync_t *sync_handle = NULL;
+
+    if (!ret_sync_handle) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
 
     if (validate_recv_input(handle, host_src, device_dst, len) != 0) {
         return -1;
