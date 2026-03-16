@@ -142,6 +142,22 @@ static bool worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
     return true;
 }
 
+// 回滚最近入队的若干任务（必须已持有 worker->mutex）
+static void rollback_worker_tail_tasks(WorkerThread* worker, uint32_t rollback_count) {
+    while (rollback_count > 0 && worker->queue_size > 0) {
+        uint32_t tail = (worker->queue_tail + worker->queue_cap - 1) % worker->queue_cap;
+        ThreadPoolTask* task = worker->task_queue[tail];
+        worker->task_queue[tail] = NULL;
+        worker->queue_tail = tail;
+        worker->queue_size--;
+        if (task) {
+            free(task->task_arg); // InternalTask
+            free(task);
+        }
+        rollback_count--;
+    }
+}
+
 // 从 worker 队列中取出指定 request_id 的第一个任务（必须已持有 worker->mutex）
 static ThreadPoolTask* worker_queue_pop_by_req(WorkerThread* worker, uint32_t req_id) {
     if (worker->queue_size == 0) return NULL;
@@ -625,6 +641,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         return NULL;
     }
     int worker_idx = target_worker->worker_idx;
+    uint32_t pushed_count = 0;
 
     pthread_mutex_lock(&target_worker->mutex);
 
@@ -662,9 +679,11 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
             success = false;
             break;
         }
+        pushed_count++;
     }
 
     if (!success) {
+        rollback_worker_tail_tasks(target_worker, pushed_count);
         pthread_mutex_unlock(&target_worker->mutex);
         free(task_ids);
         return NULL;
