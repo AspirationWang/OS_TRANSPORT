@@ -38,6 +38,7 @@ static int alloc_task_group(task_group_t **task_group_out, uint64_t task_num, si
 static int init_task_sync(task_sync_t **sync_out)
 {
     task_sync_t *sync = NULL;
+    int ret;
 
     if (!sync_out) {
         return -1;
@@ -47,9 +48,16 @@ static int init_task_sync(task_sync_t **sync_out)
     if (!sync) {
         return -1;
     }
-    if (pthread_mutex_init(&sync->mutex, NULL) != 0 || pthread_cond_init(&sync->cond, NULL) != 0) {
+
+    ret = pthread_mutex_init(&sync->mutex, NULL);
+    if (ret != 0) {
+        free(sync);
+        return -1;
+    }
+
+    ret = pthread_cond_init(&sync->cond, NULL);
+    if (ret != 0) {
         pthread_mutex_destroy(&sync->mutex);
-        pthread_cond_destroy(&sync->cond);
         free(sync);
         return -1;
     }
@@ -149,9 +157,9 @@ static int32_t update_jfc_for_poll(urma_jfce_t *jfce, urma_jfc_t *jfc, bool urma
 
 static int validate_send_input(void *handle, struct urma_jetty_info *jetty_info,
                                struct buffer_info *local_src, struct buffer_info *remote_dst,
-                               uint32_t len)
+                               uint32_t len, task_sync_t **ret_sync_handle)
 {
-    if (!handle || !jetty_info || !local_src || !remote_dst || len == 0) {
+    if (!handle || !jetty_info || !local_src || !remote_dst || !ret_sync_handle || len == 0) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
     }
@@ -163,9 +171,10 @@ static int validate_send_input(void *handle, struct urma_jetty_info *jetty_info,
 }
 
 static int validate_recv_input(void *handle, struct buffer_info *host_src,
-                               device_info_t *device_dst, uint32_t len)
+                               device_info_t *device_dst, uint32_t len,
+                               task_sync_t **ret_sync_handle)
 {
-    if (!handle || !host_src || !device_dst || len == 0) {
+    if (!handle || !host_src || !device_dst || !ret_sync_handle || len == 0) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
     }
@@ -597,13 +606,14 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     struct chunk_info *chunks;
     uint64_t chunks_num;
     task_sync_t *sync_handle = NULL;
+    uint32_t ret = -1;
 
     if (ret_sync_handle) {
         *ret_sync_handle = NULL;
     }
 
-    if (validate_send_input(handle, jetty_info, local_src, remote_dst, len) != 0) {
-        return -1;
+    if (validate_send_input(handle, jetty_info, local_src, remote_dst, len, ret_sync_handle) != 0) {
+        return ret;
     }
 
     if (len <= DEFAULT_CHUNK_SIZE) {
@@ -611,7 +621,7 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     }
 
     if (send_split_chunks(local_src, remote_dst, len, &chunks, &chunks_num) != 0) {
-        return -1;
+        return ret;
     }
 
     write_info = build_write_info(jetty_info, local_src, remote_dst, server_key, client_key);
@@ -626,8 +636,9 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
                                        urma_info,
                                        &sync_handle) != 0) {
         free(chunks);
-        return -1;
+        return ret;
     }
+    *ret_sync_handle = sync_handle;
     if (urma_write_with_notify(write_info, &chunks[0]) != URMA_SUCCESS) {
         // 如果第一个chunk发送失败，应该直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
         pthread_mutex_lock(&sync_handle->mutex);
@@ -635,9 +646,6 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
         pthread_cond_signal(&sync_handle->cond);
         pthread_mutex_unlock(&sync_handle->mutex);
         return -1;
-    }
-    if (ret_sync_handle) {
-        *ret_sync_handle = sync_handle;
     }
 
     return 0;
@@ -652,12 +660,11 @@ uint32_t os_transport_recv(void *handle, struct buffer_info *host_src, device_in
     uint64_t chunks_num;
     task_sync_t *sync_handle = NULL;
 
-    if (!ret_sync_handle) {
-        fprintf(stderr, "os_transport: 参数非法\n");
-        return -1;
+    if (ret_sync_handle) {
+        *ret_sync_handle = NULL;
     }
 
-    if (validate_recv_input(handle, host_src, device_dst, len) != 0) {
+    if (validate_recv_input(handle, host_src, device_dst, len, ret_sync_handle) != 0) {
         return -1;
     }
 
@@ -686,17 +693,23 @@ uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle)
 {
     uint32_t completed_success = 0;
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
+    task_group_t *task_group;
 
     if (!ost_handle || !sync_handle) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
     }
+    task_group = sync_handle->task_group;
+    if (!task_group) {
+        fprintf(stderr, "os_transport: 参数非法\n");
+        return -1;
+    }
 
     completed_success = wait_for_task_complete(sync_handle);
+
     if (completed_success != 0) {
-        uint32_t request_id = sync_handle->task_group->tasks[0].request_id; 
-        thread_pool_cancel_tasks_by_req(ost_handle->thread_pool,
-                                        request_id);
+        uint32_t request_id = task_group->tasks[0].request_id;
+        thread_pool_cancel_tasks_by_req(ost_handle->thread_pool, request_id);
     }
     free_sync_owned_resources(sync_handle);
     return completed_success;
