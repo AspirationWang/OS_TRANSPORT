@@ -106,16 +106,8 @@ uint32_t wait_for_task_complete(task_sync_t *sync_handle)
         pthread_cond_wait(&sync_handle->cond, &sync_handle->mutex);
     }
     pthread_mutex_unlock(&sync_handle->mutex);
-    task_group_t *task_group = sync_handle->task_group;
-    if (!task_group) {
-        fprintf(stderr, "os_transport: 任务组信息缺失\n");
+    if (sync_handle->completed_tasks != sync_handle->total_tasks) {
         return -1;
-    }
-    for (uint64_t i = 0; i < task_group->task_num; i++) {
-        if (!task_group->tasks[i].is_completed) {
-            fprintf(stderr, "os_transport: 任务未完成\n");
-            return -1;
-        }
     }
     return 0;
 }
