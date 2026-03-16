@@ -1,4 +1,4 @@
-#include "os_transport.h"
+#include "os_transport_internal.h"
 #include "os_transport_thread_pool_internal.h"
 #include <pthread.h>
 #include <stdio.h>
@@ -8,8 +8,7 @@
 // 全局初始化状态
 static int g_inited = 0;
 
-static int alloc_task_group(task_group_t **task_group_out, uint64_t task_num,
-                            size_t task_arg_size)
+static int alloc_task_group(task_group_t **task_group_out, uint64_t task_num, size_t task_arg_size)
 {
     task_group_t *task_group = NULL;
 
@@ -63,15 +62,15 @@ static void free_task_group_resource(task_sync_t *sync)
 {
     task_group_t *task_group;
 
-    if (!sync || !sync->group_task_args) {
+    if (!sync || !sync->task_group) {
         return;
     }
 
-    task_group = sync->group_task_args;
+    task_group = sync->task_group;
     free(task_group->task_args);
     free(task_group->tasks);
     free(task_group);
-    sync->group_task_args = NULL;
+    sync->task_group = NULL;
 }
 
 static void free_sync_owned_resources(task_sync_t *sync)
@@ -99,7 +98,7 @@ uint32_t wait_for_task_complete(task_sync_t *sync_handle)
         pthread_cond_wait(&sync_handle->cond, &sync_handle->mutex);
     }
     pthread_mutex_unlock(&sync_handle->mutex);
-    task_group_t *task_group = sync_handle->group_task_args;
+    task_group_t *task_group = sync_handle->task_group;
     if (!task_group) {
         fprintf(stderr, "os_transport: 任务组信息缺失\n");
         return -1;
@@ -113,12 +112,22 @@ uint32_t wait_for_task_complete(task_sync_t *sync_handle)
     return 0;
 }
 
-static void mark_task_group_completed(task_sync_t *sync)
+static void mark_task_group_completed(task_sync_t *sync, bool task_success)
 {
     if (!sync) {
         return;
     }
 
+    // 如果当前task执行失败，直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
+    if (!task_success) {
+        pthread_mutex_lock(&sync->mutex);
+        sync->request_completed = 1;
+        pthread_cond_signal(&sync->cond);
+        pthread_mutex_unlock(&sync->mutex);
+        return;
+    }
+
+    // 否则正常更新完成数，等待所有task完成后再唤醒等待线程
     pthread_mutex_lock(&sync->mutex);
     sync->completed_tasks++;
     if (sync->completed_tasks == sync->total_tasks) {
@@ -129,7 +138,8 @@ static void mark_task_group_completed(task_sync_t *sync)
 }
 
 // 更新jfc信息并绑定poll线程，确保poll线程能够正确识别和处理事件
-static int32_t update_jfc_for_poll(urma_jfce_t *jfce, urma_jfc_t *jfc, bool urma_event_mode, ThreadPoolHandle pool)
+static int32_t update_jfc_for_poll(urma_jfce_t *jfce, urma_jfc_t *jfc, bool urma_event_mode,
+                                   ThreadPoolHandle pool)
 {
     pool->urmaInfo.jfce = jfce;
     pool->urmaInfo.jfc = jfc;
@@ -298,11 +308,12 @@ int do_send_chunk_for_worker(urma_write_info_t write_info, struct chunk_info *ch
     return (int)urma_write_with_notify(write_info, chunk_info);
 }
 
-int do_recv_chunk_for_worker(urma_recv_info_t recv_info)
+int do_recv_chunk_for_worker(urma_recv_info_t recv_info, struct chunk_info *chunk_info)
 {
-    // 这里可以调用实际的H2D传输函数来接收数据
-    (void)recv_info;
-    return 0;
+    void *host_buf = (void *)(uintptr_t)chunk_info->src;
+    void *device_buf = (void *)(uintptr_t)chunk_info->dst;
+    cudaStream_t stream = recv_info.device_info.stream;
+    return cudaMemcpyAsync(device_buf, host_buf, chunk_info->len, cudaMemcpyHostToDevice, stream);
 }
 
 // worker线程执行的send任务函数，负责发送chunk
@@ -312,7 +323,7 @@ int send_task_worker_func(void *arg)
 
     send_task_arg_t *send_task_arg = (send_task_arg_t *)arg;
     ret = do_send_chunk_for_worker(send_task_arg->write_info, send_task_arg->chunk_info);
-    mark_task_group_completed(send_task_arg->sync);
+    mark_task_group_completed(send_task_arg->sync, ret == 0 ? true : false);
     return ret;
 }
 
@@ -321,8 +332,8 @@ int recv_task_worker_func(void *arg)
 {
     int ret = 0;
     recv_task_arg_t *recv_task_arg = (recv_task_arg_t *)arg;
-    ret = do_recv_chunk_for_worker(recv_task_arg->recv_info);
-    mark_task_group_completed(recv_task_arg->sync);
+    ret = do_recv_chunk_for_worker(recv_task_arg->recv_info, recv_task_arg->chunk_info);
+    mark_task_group_completed(recv_task_arg->sync, ret == 0 ? true : false);
     return ret;
 }
 
@@ -358,7 +369,8 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, struct chunk_i
                                 chunk_idx,
                                 is_last_chunk,
                                 sync);
-        task_group->tasks[i] = construct_worker_task(chunk_idx, request_id, task_func, &task_args[i]);
+        task_group->tasks[i] =
+            construct_worker_task(chunk_idx, request_id, task_func, &task_args[i]);
     }
 
     task_ids = thread_pool_submit_batch_tasks(
@@ -372,7 +384,7 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, struct chunk_i
     }
 
     free(task_ids);
-    sync->group_task_args = task_group;
+    sync->task_group = task_group;
     return 0;
 }
 
@@ -410,7 +422,7 @@ static int register_recv_tasks(os_transport_handle_t *ost_handle, struct chunk_i
     }
 
     free(task_ids);
-    sync->group_task_args = task_group;
+    sync->task_group = task_group;
     return 0;
 }
 
@@ -617,8 +629,11 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
         return -1;
     }
     if (urma_write_with_notify(write_info, &chunks[0]) != URMA_SUCCESS) {
-        // TODO：如果第一个chunk发送失败，应该取消后续任务的执行，并释放资源
-        wait_and_free_sync(sync_handle);
+        // 如果第一个chunk发送失败，应该直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
+        pthread_mutex_lock(&sync_handle->mutex);
+        sync_handle->request_completed = 1;
+        pthread_cond_signal(&sync_handle->cond);
+        pthread_mutex_unlock(&sync_handle->mutex);
         return -1;
     }
     if (ret_sync_handle) {
@@ -667,15 +682,22 @@ uint32_t os_transport_recv(void *handle, struct buffer_info *host_src, device_in
     return 0;
 }
 
-uint32_t wait_and_free_sync(task_sync_t *sync_handle)
+uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle)
 {
     uint32_t completed_success = 0;
-    if (!sync_handle) {
+    os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
+
+    if (!ost_handle || !sync_handle) {
         fprintf(stderr, "os_transport: 参数非法\n");
         return -1;
     }
 
     completed_success = wait_for_task_complete(sync_handle);
+    if (completed_success != 0) {
+        uint32_t request_id = sync_handle->task_group->tasks[0].request_id; 
+        thread_pool_cancel_tasks_by_req(ost_handle->thread_pool,
+                                        request_id);
+    }
     free_sync_owned_resources(sync_handle);
     return completed_success;
 }

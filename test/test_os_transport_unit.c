@@ -26,6 +26,15 @@ static uint32_t g_mock_urma_write_calls = 0;
 static urma_write_info_t g_mock_last_write_info;
 static struct chunk_info g_mock_last_write_chunk;
 
+/* CUDA memcpy mock controls and observations. */
+static int g_mock_cuda_memcpy_ret = 0;
+static uint32_t g_mock_cuda_memcpy_calls = 0;
+static void *g_mock_cuda_last_dst = NULL;
+static const void *g_mock_cuda_last_src = NULL;
+static size_t g_mock_cuda_last_count = 0;
+static enum cudaMemcpyKind g_mock_cuda_last_kind = cudaMemcpyHostToHost;
+static cudaStream_t g_mock_cuda_last_stream = {0};
+
 /* Reset all global mock states between tests. */
 static void reset_mocks(void)
 {
@@ -41,6 +50,14 @@ static void reset_mocks(void)
     g_mock_urma_write_calls = 0;
     memset(&g_mock_last_write_info, 0, sizeof(g_mock_last_write_info));
     memset(&g_mock_last_write_chunk, 0, sizeof(g_mock_last_write_chunk));
+
+    g_mock_cuda_memcpy_ret = 0;
+    g_mock_cuda_memcpy_calls = 0;
+    g_mock_cuda_last_dst = NULL;
+    g_mock_cuda_last_src = NULL;
+    g_mock_cuda_last_count = 0;
+    g_mock_cuda_last_kind = cudaMemcpyHostToHost;
+    memset(&g_mock_cuda_last_stream, 0, sizeof(g_mock_cuda_last_stream));
 }
 
 ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap)
@@ -126,6 +143,18 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_
     return g_mock_urma_write_status;
 }
 
+int cudaMemcpyAsync(void *dst, const void *src, size_t count, enum cudaMemcpyKind kind,
+                    cudaStream_t stream)
+{
+    g_mock_cuda_memcpy_calls++;
+    g_mock_cuda_last_dst = dst;
+    g_mock_cuda_last_src = src;
+    g_mock_cuda_last_count = count;
+    g_mock_cuda_last_kind = kind;
+    g_mock_cuda_last_stream = stream;
+    return g_mock_cuda_memcpy_ret;
+}
+
 static int dummy_task_func(void *arg)
 {
     (void)arg;
@@ -141,7 +170,7 @@ static task_sync_t *create_sync_with_tasks(uint32_t task_num, int request_comple
     assert(init_task_sync(&sync) == 0);
     assert(alloc_task_group(&task_group, task_num, sizeof(send_task_arg_t)) == 0);
 
-    sync->group_task_args = task_group;
+    sync->task_group = task_group;
     sync->request_completed = request_completed;
     sync->total_tasks = task_num;
     return sync;
@@ -207,11 +236,11 @@ static void test_init_task_sync_and_free_helpers(void)
     assert(sync != NULL);
 
     assert(alloc_task_group(&task_group, 1, sizeof(send_task_arg_t)) == 0);
-    sync->group_task_args = task_group;
+    sync->task_group = task_group;
 
     free_task_group_resource(NULL);
     free_task_group_resource(sync);
-    assert(sync->group_task_args == NULL);
+    assert(sync->task_group == NULL);
 
     free_sync_owned_resources(NULL);
 
@@ -230,8 +259,8 @@ static void test_wait_for_task_complete_and_mark(void)
     assert(wait_for_task_complete(NULL) == (uint32_t)-1);
 
     sync = create_sync_with_tasks(2, 1);
-    sync->group_task_args->tasks[0].is_completed = true;
-    sync->group_task_args->tasks[1].is_completed = false;
+    sync->task_group->tasks[0].is_completed = true;
+    sync->task_group->tasks[1].is_completed = false;
     assert(wait_for_task_complete(sync) == (uint32_t)-1);
     free_sync_owned_resources(sync);
 
@@ -245,8 +274,8 @@ static void test_wait_for_task_complete_and_mark(void)
     assert(sync->completed_tasks == 2);
     assert(sync->request_completed == 1);
 
-    sync->group_task_args->tasks[0].is_completed = true;
-    sync->group_task_args->tasks[1].is_completed = true;
+    sync->task_group->tasks[0].is_completed = true;
+    sync->task_group->tasks[1].is_completed = true;
     assert(wait_for_task_complete(sync) == 0);
 
     mark_task_group_completed(NULL);
@@ -438,7 +467,14 @@ static void test_do_chunk_and_worker_funcs(void)
     g_mock_urma_write_status = 7;
     assert(do_send_chunk_for_worker(write_info, &chunk) == 7);
     assert(g_mock_urma_write_calls == 1);
-    assert(do_recv_chunk_for_worker(recv_info) == 0);
+    recv_info.device_info.stream.i = 9;
+    assert(do_recv_chunk_for_worker(recv_info, &chunk) == 0);
+    assert(g_mock_cuda_memcpy_calls == 1);
+    assert(g_mock_cuda_last_dst == (void *)(uintptr_t)chunk.dst);
+    assert(g_mock_cuda_last_src == (void *)(uintptr_t)chunk.src);
+    assert(g_mock_cuda_last_count == chunk.len);
+    assert(g_mock_cuda_last_kind == cudaMemcpyHostToDevice);
+    assert(g_mock_cuda_last_stream.i == 9);
 
     assert(init_task_sync(&sync_send) == 0);
     sync_send->total_tasks = 1;
@@ -453,7 +489,8 @@ static void test_do_chunk_and_worker_funcs(void)
     assert(init_task_sync(&sync_recv) == 0);
     sync_recv->total_tasks = 1;
     construct_recv_task_arg(&recv_arg, recv_info, &chunk, true, sync_recv);
-    assert(recv_task_worker_func(&recv_arg) == 0);
+    g_mock_cuda_memcpy_ret = -3;
+    assert(recv_task_worker_func(&recv_arg) == -3);
     assert(sync_recv->completed_tasks == 1);
     assert(sync_recv->request_completed == 1);
 
@@ -489,21 +526,21 @@ static void test_register_task_functions(void)
     assert(init_task_sync(&sync) == 0);
     g_mock_submit_fail = 1;
     assert(register_send_tasks(&ost_handle, chunks, 2, dummy_task_func, urma_info, sync) == -1);
-    assert(sync->group_task_args == NULL);
+    assert(sync->task_group == NULL);
     g_mock_submit_fail = 0;
     free_sync_owned_resources(sync);
 
     assert(init_task_sync(&sync) == 0);
     assert(register_send_tasks(&ost_handle, chunks, 3, dummy_task_func, urma_info, sync) == 0);
     assert(sync->total_tasks == 2);
-    assert(sync->group_task_args != NULL);
-    assert(sync->group_task_args->task_num == 2);
-    send_args = (send_task_arg_t *)sync->group_task_args->task_args;
+    assert(sync->task_group != NULL);
+    assert(sync->task_group->task_num == 2);
+    send_args = (send_task_arg_t *)sync->task_group->task_args;
     assert(send_args[0].chunk_info == &chunks[1]);
     assert(send_args[0].is_last_chunk == false);
     assert(send_args[1].chunk_info == &chunks[2]);
     assert(send_args[1].is_last_chunk == true);
-    assert(sync->group_task_args->tasks[0].request_id == 0x55AA);
+    assert(sync->task_group->tasks[0].request_id == 0x55AA);
     assert(g_mock_last_submit_task_count == 2);
     free_sync_owned_resources(sync);
 
@@ -517,13 +554,13 @@ static void test_register_task_functions(void)
     assert(init_task_sync(&sync) == 0);
     assert(register_recv_tasks(&ost_handle, chunks, 2, dummy_task_func, urma_info, sync) == 0);
     assert(sync->total_tasks == 2);
-    assert(sync->group_task_args->task_num == 2);
-    recv_args = (recv_task_arg_t *)sync->group_task_args->task_args;
+    assert(sync->task_group->task_num == 2);
+    recv_args = (recv_task_arg_t *)sync->task_group->task_args;
     assert(recv_args[0].chunk_info == &chunks[0]);
     assert(recv_args[0].is_last_chunk == false);
     assert(recv_args[1].chunk_info == &chunks[1]);
     assert(recv_args[1].is_last_chunk == true);
-    assert(sync->group_task_args->tasks[0].request_id == 0x777);
+    assert(sync->task_group->tasks[0].request_id == 0x777);
     free_sync_owned_resources(sync);
 }
 
@@ -757,11 +794,11 @@ static void test_wait_and_free_sync(void)
     assert(wait_and_free_sync(NULL) == (uint32_t)-1);
 
     sync = create_sync_with_tasks(1, 1);
-    sync->group_task_args->tasks[0].is_completed = true;
+    sync->task_group->tasks[0].is_completed = true;
     assert(wait_and_free_sync(sync) == 0);
 
     sync = create_sync_with_tasks(1, 1);
-    sync->group_task_args->tasks[0].is_completed = false;
+    sync->task_group->tasks[0].is_completed = false;
     assert(wait_and_free_sync(sync) == (uint32_t)-1);
 }
 

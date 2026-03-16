@@ -99,6 +99,7 @@ static int internal_task_wrapper(void* arg) {
     }
     LOG_DEBUG("Task %lu completed", itask->task_id);
     free(itask);
+    return ret;
 }
 
 // 生成唯一任务ID
