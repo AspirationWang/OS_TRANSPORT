@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#define OST_LOG_DEBUG(fmt, ...) LOG_DEBUG("[%s] " fmt, __func__, ##__VA_ARGS__)
+#define OST_LOG_INFO(fmt, ...)  LOG_INFO("[%s] " fmt, __func__, ##__VA_ARGS__)
+#define OST_LOG_WARN(fmt, ...)  LOG_WARN("[%s] " fmt, __func__, ##__VA_ARGS__)
+#define OST_LOG_ERROR(fmt, ...) LOG_ERROR("[%s] " fmt, __func__, ##__VA_ARGS__)
+
 typedef enum {
     NOT_SPLIT = 0,
     MIDDLE_CHUNK,
