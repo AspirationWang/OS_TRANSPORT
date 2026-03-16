@@ -771,3 +771,74 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     free(handle);
     LOG_INFO("Thread pool destroyed");
 }
+
+// 根据 request_id 销毁所有未执行的任务
+int thread_pool_cancel_tasks_by_req(ThreadPoolHandle handle, uint32_t request_id) {
+    if (!handle || !handle->is_running) {
+        LOG_ERROR("Invalid handle or thread pool not running");
+        return -1;
+    }
+
+    // 查找该 request_id 对应的上下文
+    RequestContext* ctx = find_req_context(handle, request_id);
+    if (!ctx) {
+        LOG_DEBUG("No context found for request_id %u, nothing to cancel", request_id);
+        return 0;
+    }
+
+    int worker_idx = ctx->worker_idx;
+    WorkerThread* worker = &handle->workers[worker_idx];
+    uint32_t removed = 0;
+
+    pthread_mutex_lock(&worker->mutex);
+
+    // 遍历 worker 队列，移除所有匹配 request_id 的任务
+    uint32_t head = worker->queue_head;
+    uint32_t new_size = 0;
+    for (uint32_t i = 0; i < worker->queue_size; i++) {
+        uint32_t pos = (head + i) % worker->queue_cap;
+        ThreadPoolTask* task = worker->task_queue[pos];
+        if (task->request_id == request_id) {
+            // 释放任务内部结构和任务本身
+            free(task->task_arg); // InternalTask
+            free(task);
+            removed++;
+        } else {
+            uint32_t dest = (head + new_size) % worker->queue_cap;
+            if (dest != pos) {
+                worker->task_queue[dest] = task;
+            }
+            new_size++;
+        }
+    }
+
+    worker->queue_size = new_size;
+    worker->queue_tail = (head + new_size) % worker->queue_cap;
+    pthread_mutex_unlock(&worker->mutex);
+
+    if (removed > 0) {
+        // 更新上下文中的 pending_count，如果变为0则移除上下文
+        pthread_mutex_lock(&handle->req_hash_mutex);
+        // ctx 指针仍然有效，因为我们在持有 worker 锁时找到了它，且现在持有 req_hash_mutex，不会被释放
+        ctx->pending_count -= removed;
+        if (ctx->pending_count == 0) {
+            // 从哈希表中移除该上下文
+            uint32_t h = hash_req_id(request_id);
+            RequestContext** p = &handle->req_hash[h];
+            while (*p) {
+                if ((*p)->request_id == request_id) {
+                    RequestContext* tmp = *p;
+                    *p = tmp->next;
+                    free(tmp);
+                    break;
+                }
+                p = &(*p)->next;
+            }
+        }
+        pthread_mutex_unlock(&handle->req_hash_mutex);
+
+        LOG_DEBUG("Canceled %u tasks for request_id %u", removed, request_id);
+    }
+
+    return (int)removed;
+}
