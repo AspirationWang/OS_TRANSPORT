@@ -30,6 +30,7 @@ static int alloc_task_group(task_group_t **task_group_out, uint64_t task_num,
         free(task_group);
         return -1;
     }
+    task_group->task_num = task_num;
 
     *task_group_out = task_group;
     return 0;
@@ -581,6 +582,10 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
     uint64_t chunks_num;
     task_sync_t *sync_handle = NULL;
 
+    if (ret_sync_handle) {
+        *ret_sync_handle = NULL;
+    }
+
     if (validate_send_input(handle, jetty_info, local_src, remote_dst, len) != 0) {
         return -1;
     }
@@ -607,9 +612,14 @@ uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
         free(chunks);
         return -1;
     }
-    *ret_sync_handle = sync_handle;
     if (urma_write_with_notify(write_info, &chunks[0]) != URMA_SUCCESS) {
+        // TODO：如果第一个chunk发送失败，应该取消后续任务的执行，并释放资源
+        free(chunks);
         return -1;
+    }
+    free(chunks);
+    if (ret_sync_handle) {
+        *ret_sync_handle = sync_handle;
     }
 
     return 0;
