@@ -32,7 +32,7 @@ set_target_properties(os_transport PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-# 安装规则（包含线程池头文件）
+# 安装规则（对外仅导出 os_transport.h）
 install(
     TARGETS os_transport
     LIBRARY DESTINATION lib64
@@ -41,7 +41,6 @@ install(
 
 install(
     FILES include/os_transport.h
-          include/os_transport_thread_pool.h
     DESTINATION include/os-transport
     COMPONENT devel
 )

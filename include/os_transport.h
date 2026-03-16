@@ -1,11 +1,14 @@
 #ifndef OS_TRANSPORT_H
 #define OS_TRANSPORT_H
 
-#include "os_transport_thread_pool.h"
-#include "os_transport_urma.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <urma/urma_api.h>
+#ifdef URMA_OVER_UB
+#    include <urma/urma_ubagg.h>
+#endif
 
 #define DEFAULT_CHUNK_SIZE (2 * 1024 * 1024)   // 2MB
 
@@ -24,6 +27,25 @@ struct buffer_info {
     urma_target_seg_t *tseg;   // 目标分段信息
 };
 
+// Placeholder stream type. Replace with real cudaStream_t from cuda_runtime.h when integrating CUDA runtime.
+typedef struct {
+    int i;
+} cudaStream_t;
+
+typedef struct {
+    void *dst;             // 设备地址
+    cudaStream_t stream;   // CUDA流
+} device_info_t;
+
+typedef enum jetty_mode { JETTY_MODE_SIMPLEX = 0, JETTY_MODE_DUPLEX } jetty_mode_t;
+
+typedef struct urma_jetty_info {
+    urma_jfs_t *jfs;             /* [Public] see urma_jetty_info. */
+    urma_jetty_t *jetty;         /* [Public] see urma_jetty_info. */
+    urma_target_jetty_t *tjetty; /* [Public] see urma_jetty_info. */
+    jetty_mode_t jetty_mode;     /* [Public] see urma_jetty_info. */
+} urma_jetty_info_t;
+
 typedef struct os_transport_cfg {
     bool urma_event_mode;
     uint8_t reserved1[3];         // 保留字节，保持结构体对齐
@@ -33,28 +55,7 @@ typedef struct os_transport_cfg {
     uint32_t reserved2[10];
 } os_transport_cfg_t;
 
-typedef struct {
-    ThreadPoolTask *tasks;
-    void *task_args;
-    uint32_t task_num;
-} task_group_t;
-
-typedef struct {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    int request_completed;       // 该请求的所有task是否都已完成
-    uint64_t total_tasks;        // 任务组总任务数
-    uint64_t completed_tasks;    // 任务组已完成任务数
-    task_group_t *task_group;    // 任务组，由主线程统一释放
-    struct chunk_info *chunks;   // 本次请求关联的chunk数组，由主线程统一释放
-} task_sync_t;
-
-typedef struct os_transport_handle {
-    urma_context_t *urma_ctx;
-    uint32_t worker_thread_num;
-    bool urma_event_mode;
-    ThreadPoolHandle thread_pool;
-} os_transport_handle_t;
+typedef struct task_sync task_sync_t;
 
 uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg, void **handle);
 
