@@ -4,7 +4,7 @@
 #include <string.h>
 #include <errno.h>
 
-#define TEST_MODE
+// #define TEST_MODE
 
 #ifdef TEST_MODE
 #include <pthread.h>
