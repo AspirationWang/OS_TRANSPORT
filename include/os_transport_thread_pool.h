@@ -45,8 +45,9 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
 int thread_pool_start(ThreadPoolHandle handle);
 
 /**
- * @brief 外部提交单个任务（request_id 默认为0）
+ * @brief 外部提交单个任务
  * @param handle 线程池句柄
+ * @param request_id 请求ID
  * @param task_func 任务执行函数
  * @param task_arg 任务参数
  * @param complete_cb 任务完成回调
@@ -88,6 +89,13 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
  */
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
 
+/**
+ * @brief 根据 request_id 销毁所有未执行的任务
+ * @param handle 线程池句柄
+ * @param request_id 请求ID
+ * @return 销毁的任务数量，-1表示参数错误
+ */
+int thread_pool_cancel_tasks_by_req(ThreadPoolHandle handle, uint32_t request_id);
 
 /**
  * @brief 销毁线程池（等待所有任务完成，释放资源）

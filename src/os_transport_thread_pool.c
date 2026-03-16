@@ -4,6 +4,75 @@
 #include <string.h>
 #include <errno.h>
 
+// #define TEST_MODE
+
+#ifdef TEST_MODE
+#include <pthread.h>
+#include <stdint.h>
+#include <stdlib.h>
+
+// 模拟事件队列（用于测试）
+typedef struct {
+    uint64_t *events;
+    uint32_t cap;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t size;
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+} MockEventQueue;
+
+static MockEventQueue g_mock_queue = {0};
+
+void mock_event_queue_init(uint32_t cap) {
+    g_mock_queue.events = malloc(cap * sizeof(uint64_t));
+    g_mock_queue.cap = cap;
+    g_mock_queue.head = g_mock_queue.tail = g_mock_queue.size = 0;
+    pthread_mutex_init(&g_mock_queue.lock, NULL);
+    pthread_cond_init(&g_mock_queue.cond, NULL);
+}
+
+void mock_event_queue_push(uint64_t req_id) {
+    pthread_mutex_lock(&g_mock_queue.lock);
+    if (g_mock_queue.size >= g_mock_queue.cap) {
+        uint32_t new_cap = g_mock_queue.cap * 2;
+        uint64_t *new_events = malloc(new_cap * sizeof(uint64_t));
+        for (uint32_t i = 0; i < g_mock_queue.size; i++) {
+            new_events[i] = g_mock_queue.events[(g_mock_queue.head + i) % g_mock_queue.cap];
+        }
+        free(g_mock_queue.events);
+        g_mock_queue.events = new_events;
+        g_mock_queue.cap = new_cap;
+        g_mock_queue.head = 0;
+        g_mock_queue.tail = g_mock_queue.size;
+    }
+    g_mock_queue.events[g_mock_queue.tail] = req_id;
+    g_mock_queue.tail = (g_mock_queue.tail + 1) % g_mock_queue.cap;
+    g_mock_queue.size++;
+    pthread_cond_signal(&g_mock_queue.cond);
+    pthread_mutex_unlock(&g_mock_queue.lock);
+}
+
+static int mock_event_queue_pop(uint64_t *req_id) {
+    pthread_mutex_lock(&g_mock_queue.lock);
+    if (g_mock_queue.size == 0) {
+        pthread_mutex_unlock(&g_mock_queue.lock);
+        return 0;
+    }
+    *req_id = g_mock_queue.events[g_mock_queue.head];
+    g_mock_queue.head = (g_mock_queue.head + 1) % g_mock_queue.cap;
+    g_mock_queue.size--;
+    pthread_mutex_unlock(&g_mock_queue.lock);
+    return 1;
+}
+
+void mock_event_queue_destroy(void) {
+    free(g_mock_queue.events);
+    pthread_mutex_destroy(&g_mock_queue.lock);
+    pthread_cond_destroy(&g_mock_queue.cond);
+}
+#endif
+
 // 哈希函数
 static uint32_t hash_req_id(uint32_t req_id) {
     return (uint32_t)(req_id ^ (req_id >> 20)) % REQ_HASH_SIZE;
@@ -226,6 +295,20 @@ static void* worker_routine(void* arg) {
 /* 绑定jfc，用来等待事件 */
 static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, uint32_t try_cnt, uint32_t cr_num)
 {
+#ifdef TEST_MODE
+    uint64_t req_id;
+    int cnt = 0;
+    while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
+        TransportData td = {0};
+        td.bs.request_id = req_id;   // 将 request_id 填入联合体的 request_id 字段
+        cr[cnt].opcode = URMA_CR_OPC_SEND;
+        cr[cnt].status = URMA_SUCCESS;
+        cr[cnt].user_ctx = td.user_ctx;   // 将联合体的值赋给 user_ctx
+        cr[cnt].imm_data = 0;
+        cnt++;
+    }
+    return cnt;
+#else
     bool urma_event_mode = pool->urmaInfo.urma_event_mode;
     urma_jfce_t *jfce = pool->urmaInfo.jfce;
     urma_jfc_t *jfc = pool->urmaInfo.jfc;
@@ -275,6 +358,7 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         }
     }
     return cnt;
+#endif
 }
 
 // asyncPoll 线程主函数
@@ -686,4 +770,75 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
     pthread_cond_destroy(&handle->cond_start);
     free(handle);
     LOG_INFO("Thread pool destroyed");
+}
+
+// 根据 request_id 销毁所有未执行的任务
+int thread_pool_cancel_tasks_by_req(ThreadPoolHandle handle, uint32_t request_id) {
+    if (!handle || !handle->is_running) {
+        LOG_ERROR("Invalid handle or thread pool not running");
+        return -1;
+    }
+
+    // 查找该 request_id 对应的上下文
+    RequestContext* ctx = find_req_context(handle, request_id);
+    if (!ctx) {
+        LOG_DEBUG("No context found for request_id %u, nothing to cancel", request_id);
+        return 0;
+    }
+
+    int worker_idx = ctx->worker_idx;
+    WorkerThread* worker = &handle->workers[worker_idx];
+    uint32_t removed = 0;
+
+    pthread_mutex_lock(&worker->mutex);
+
+    // 遍历 worker 队列，移除所有匹配 request_id 的任务
+    uint32_t head = worker->queue_head;
+    uint32_t new_size = 0;
+    for (uint32_t i = 0; i < worker->queue_size; i++) {
+        uint32_t pos = (head + i) % worker->queue_cap;
+        ThreadPoolTask* task = worker->task_queue[pos];
+        if (task->request_id == request_id) {
+            // 释放任务内部结构和任务本身
+            free(task->task_arg); // InternalTask
+            free(task);
+            removed++;
+        } else {
+            uint32_t dest = (head + new_size) % worker->queue_cap;
+            if (dest != pos) {
+                worker->task_queue[dest] = task;
+            }
+            new_size++;
+        }
+    }
+
+    worker->queue_size = new_size;
+    worker->queue_tail = (head + new_size) % worker->queue_cap;
+    pthread_mutex_unlock(&worker->mutex);
+
+    if (removed > 0) {
+        // 更新上下文中的 pending_count，如果变为0则移除上下文
+        pthread_mutex_lock(&handle->req_hash_mutex);
+        // ctx 指针仍然有效，因为我们在持有 worker 锁时找到了它，且现在持有 req_hash_mutex，不会被释放
+        ctx->pending_count -= removed;
+        if (ctx->pending_count == 0) {
+            // 从哈希表中移除该上下文
+            uint32_t h = hash_req_id(request_id);
+            RequestContext** p = &handle->req_hash[h];
+            while (*p) {
+                if ((*p)->request_id == request_id) {
+                    RequestContext* tmp = *p;
+                    *p = tmp->next;
+                    free(tmp);
+                    break;
+                }
+                p = &(*p)->next;
+            }
+        }
+        pthread_mutex_unlock(&handle->req_hash_mutex);
+
+        LOG_DEBUG("Canceled %u tasks for request_id %u", removed, request_id);
+    }
+
+    return (int)removed;
 }
