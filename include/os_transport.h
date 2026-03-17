@@ -33,8 +33,13 @@ typedef struct {
 } cudaStream_t;
 
 typedef struct {
+    int i;
+} cudaEvent_t;
+
+typedef struct {
     void *dst;             // 设备地址
     cudaStream_t stream;   // CUDA流
+    cudaEvent_t event;     // CUDA事件
 } device_info_t;
 
 typedef enum jetty_mode { JETTY_MODE_SIMPLEX = 0, JETTY_MODE_DUPLEX } jetty_mode_t;
