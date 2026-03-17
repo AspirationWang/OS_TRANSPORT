@@ -1,4 +1,4 @@
-#include "os_transport.h"
+#include "os_transport_internal.h"
 
 urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_info *chunk_info){
     urma_sge_t src_sge = {
@@ -34,6 +34,10 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_
         .next = NULL
     };
     urma_jfs_wr_t *bad_wr;
-
-    return urma_post_jetty_send_wr(write_info.jetty, &wr, &bad_wr);
+    if (write_info.jfs)
+        return urma_post_jfs_wr(write_info.jfs, &wr, &bad_wr);
+    else if (write_info.jetty)
+        return urma_post_jetty_send_wr(write_info.jetty, &wr, &bad_wr);
+    else
+        return URMA_FAIL;
 }
