@@ -42,7 +42,6 @@ cp -r %{install_root}/* %{buildroot}/
 %files devel
 %defattr(-,root,root)
 /usr/include/os-transport/os_transport.h
-/usr/include/os-transport/os_transport_thread_pool.h
 
 # ========== 触发ldconfig更新库缓存 ==========
 %post -p /sbin/ldconfig
