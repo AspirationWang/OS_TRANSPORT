@@ -80,14 +80,6 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
                                          TaskCompleteCb batch_complete_cb,
                                          void* batch_user_data);
 
-/**
- * @brief 通用通知asyncPoll接口（支持自定义事件）
- * @param handle 线程池句柄
- * @param notify_type 通知类型（0=任务提交，1+=自定义事件）
- * @param data 通知数据（用户自行管理内存）
- * @return 0=成功，-1=失败
- */
-int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data);
 
 /**
  * @brief 根据 request_id 销毁所有未执行的任务

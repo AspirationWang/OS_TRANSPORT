@@ -711,24 +711,6 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
     return task_ids;
 }
 
-// 通用通知接口（用于其他事件）
-int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data) {
-    if (!handle || !handle->is_running) return -1;
-    pthread_mutex_lock(&handle->global_mutex);
-    if (handle->notify_queue_size >= handle->notify_queue_cap) {
-        pthread_mutex_unlock(&handle->global_mutex);
-        LOG_WARN("Notify queue full, type %u dropped", notify_type);
-        return -1;
-    }
-    handle->notify_queue[handle->notify_queue_tail].type = notify_type;
-    handle->notify_queue[handle->notify_queue_tail].data = data;
-    handle->notify_queue_tail = (handle->notify_queue_tail + 1) % handle->notify_queue_cap;
-    handle->notify_queue_size++;
-    pthread_cond_signal(&handle->cond_interrupt);
-    pthread_mutex_unlock(&handle->global_mutex);
-    LOG_DEBUG("Notify type %u sent", notify_type);
-    return 0;
-}
 
 // 销毁线程池
 void thread_pool_destroy(ThreadPoolHandle handle) {
