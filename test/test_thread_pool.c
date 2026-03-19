@@ -20,16 +20,6 @@ typedef int urma_status_t;
 #define URMA_CR_OPC_SEND 1
 #define URMA_CR_OPC_WRITE_WITH_IMM 2
 
-typedef struct urma_jfce { int dummy; } urma_jfce_t;
-typedef struct urma_jfc { int dummy; } urma_jfc_t;
-
-typedef struct urma_cr {
-    urma_cr_opcode_t opcode;
-    urma_status_t status;
-    uint64_t imm_data;
-    uint64_t user_ctx;
-} urma_cr_t;
-
 /* ---------- 声明测试模式下的模拟队列函数（实现在 .c 中） ---------- */
 void mock_event_queue_init(uint32_t cap);
 void mock_event_queue_push(uint64_t req_id);
