@@ -348,6 +348,12 @@ int recv_task_worker_func(void *arg)
     recv_task_arg_t *recv_task_arg = (recv_task_arg_t *)arg;
     ret = do_recv_chunk_for_worker(recv_task_arg->recv_info, recv_task_arg->chunk_info);
     mark_task_group_completed(recv_task_arg->sync, ret == 0 ? true : false);
+    if (recv_task_arg->is_last_chunk) {
+        // 主线程返回后通过cudaEventSynchronize(event)等待所有h2d操作完成，确保数据可用
+        cudaStream_t stream = recv_task_arg->recv_info.device_info.stream;
+        cudaEvent_t event = recv_task_arg->recv_info.device_info.event;
+        cudaEventRecord(event, stream);
+    }
     return ret;
 }
 

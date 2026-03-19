@@ -125,6 +125,14 @@ uint64_t *thread_pool_submit_batch_tasks(ThreadPoolHandle handle, ThreadPoolTask
     return task_ids;
 }
 
+int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void *data)
+{
+    (void)handle;
+    (void)notify_type;
+    (void)data;
+    return 0;
+}
+
 int thread_pool_cancel_tasks_by_req(ThreadPoolHandle handle, uint32_t request_id)
 {
     if (!handle) {

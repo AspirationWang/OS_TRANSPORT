@@ -30,23 +30,22 @@ typedef enum {
     WORKER_STATE_EXIT = 3     // 退出
 } WorkerState;
 
-// 任务节点
-typedef struct TaskNode {
-    ThreadPoolTask* task;
-    struct TaskNode* next;
-} TaskNode;
-
+/**
+ * @brief Worker线程结构体
+ */
 typedef struct {
-    pthread_t tid;                 // 线程ID
-    pthread_mutex_t mutex;         // 线程锁
-    pthread_cond_t cond_task;      // 任务通知条件变量
-    WorkerState state;             // 线程状态（IDLE/BUSY/EXIT等）
-    int worker_idx;                // 线程索引
-    ThreadPoolHandle pool;         // 所属线程池句柄
-    TaskNode* queue_head;          // 队首
-    TaskNode* queue_tail;          // 队尾
-    uint32_t queue_size;           // 当前任务数
-    uint32_t pending_req;          // 等待执行的 request_id（0表示无待执行）
+    pthread_t tid;                  // 线程ID
+    pthread_mutex_t mutex;          // 线程锁
+    pthread_cond_t cond_task;       // 任务通知条件变量
+    WorkerState state;              // 线程状态（IDLE/BUSY/EXIT等）
+    int worker_idx;                 // 线程索引
+    ThreadPoolHandle pool;          // 所属线程池句柄
+    ThreadPoolTask** task_queue;    // 任务指针数组（循环队列）
+    uint32_t queue_cap;             // 队列容量
+    uint32_t queue_head;            // 队列头指针
+    uint32_t queue_tail;            // 队列尾指针
+    uint32_t queue_size;            // 当前队列任务数
+    uint32_t pending_req;           // 等待执行的 request_id（0表示无待执行）
 } WorkerThread;
 
 /**
