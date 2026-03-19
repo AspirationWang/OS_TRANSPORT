@@ -65,14 +65,6 @@ typedef struct RequestContext {
 } RequestContext;
 
 /**
- * @brief 通知项（用于通用通知）
- */
-typedef struct {
-    uint32_t type;
-    void* data;
-} NotifyItem;
-
-/**
  * @brief urma相关信息，用于与asyncPool线程绑定
  */
 typedef struct {
@@ -109,13 +101,6 @@ struct _ThreadPool {
     pthread_cond_t cond_start;      // 线程启动信号
     pthread_mutex_t start_mutex;    // 启动控制锁
     bool is_started;                // asyncPoll是否已启动
-
-    // 通用通知队列（保留以备扩展）
-    NotifyItem* notify_queue;       // 通知队列数组
-    uint32_t notify_queue_cap;      // 队列容量
-    uint32_t notify_queue_head;     // 队列头（取通知）
-    uint32_t notify_queue_tail;     // 队列尾（存通知）
-    uint32_t notify_queue_size;     // 队列当前通知数
 
     // URMA 相关信息
     ThreadPoolUrmaInfo urmaInfo;

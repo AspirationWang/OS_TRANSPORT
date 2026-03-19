@@ -353,13 +353,6 @@ static void init_workers_basic(ThreadPoolHandle pool) {
     }
 }
 
-// 初始化通知队列
-static bool init_notify_queue(ThreadPoolHandle pool) {
-    pool->notify_queue_cap = 64;
-    pool->notify_queue = malloc(pool->notify_queue_cap * sizeof(NotifyItem));
-    return (pool->notify_queue != NULL);
-}
-
 // 创建单个 worker 线程
 static bool create_worker(ThreadPoolHandle pool, int idx) {
     WorkerThread* w = &pool->workers[idx];
@@ -457,11 +450,6 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
 
     init_pool_sync(pool);
     init_workers_basic(pool);
-
-    if (!init_notify_queue(pool)) {
-        free(pool);
-        return NULL;
-    }
 
     memset(pool->req_hash, 0, sizeof(pool->req_hash));
     pool->next_task_id = 1;
@@ -720,25 +708,6 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
     return task_ids;
 }
 
-// 通用通知接口
-int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data) {
-    if (!handle || !handle->is_running) return -1;
-    pthread_mutex_lock(&handle->global_mutex);
-    if (handle->notify_queue_size >= handle->notify_queue_cap) {
-        pthread_mutex_unlock(&handle->global_mutex);
-        LOG_WARN("Notify queue full, type %u dropped", notify_type);
-        return -1;
-    }
-    handle->notify_queue[handle->notify_queue_tail].type = notify_type;
-    handle->notify_queue[handle->notify_queue_tail].data = data;
-    handle->notify_queue_tail = (handle->notify_queue_tail + 1) % handle->notify_queue_cap;
-    handle->notify_queue_size++;
-    pthread_cond_signal(&handle->cond_interrupt);
-    pthread_mutex_unlock(&handle->global_mutex);
-    LOG_DEBUG("Notify type %u sent", notify_type);
-    return 0;
-}
-
 // 从 worker 队列中取消指定 request_id 的任务（返回移除数量）
 static uint32_t cancel_in_worker_queue(WorkerThread* worker, uint32_t req_id) {
     pthread_mutex_lock(&worker->mutex);
@@ -827,7 +796,6 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
 
     destroy_all_workers(handle);
     destroy_hash_table(handle);
-    free(handle->notify_queue);
     destroy_pool_sync(handle);
     free(handle);
     LOG_INFO("Thread pool destroyed");
