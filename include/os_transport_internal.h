@@ -26,11 +26,11 @@ typedef struct {
     uint32_t task_num;
 } task_group_t;
 
-struct chunk_info {
+typedef struct chunk_info {
     uint64_t src;   // 源缓冲区地址
     uint64_t dst;   // 目标缓冲区地址
     uint32_t len;   // 数据长度
-};
+} chunk_info_t;
 
 struct task_sync {
     pthread_mutex_t mutex;
@@ -39,7 +39,7 @@ struct task_sync {
     uint64_t total_tasks;        // 任务组总任务数
     uint64_t completed_tasks;    // 任务组已完成任务数
     task_group_t *task_group;    // 任务组，由主线程统一释放
-    struct chunk_info *chunks;   // 本次请求关联的chunk数组，由主线程统一释放
+    chunk_info_t *chunks;   // 本次请求关联的chunk数组，由主线程统一释放
 };
 
 typedef struct os_transport_handle {
@@ -60,7 +60,7 @@ typedef struct {
     // 与主函数的同步信息
     task_sync_t *sync;
     // chunk相关参数
-    struct chunk_info *chunk_info;
+    chunk_info_t *chunk_info;
     bool is_last_chunk;
     // urma发送端相关参数
     urma_write_info_t write_info;
@@ -70,7 +70,7 @@ typedef struct {
     // 与主函数的同步信息
     task_sync_t *sync;
     // chunk相关参数
-    struct chunk_info *chunk_info;
+    chunk_info_t *chunk_info;
     bool is_last_chunk;
     // urma接收端相关参数，包括h2d相关信息
     urma_recv_info_t recv_info;

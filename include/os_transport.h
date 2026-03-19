@@ -5,9 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
-#include <urma/urma_api.h>
+#include <cuda_runtime.h>
+#include <urma_api.h>
 #ifdef URMA_OVER_UB
-#    include <urma/urma_ubagg.h>
+#    include <urma_ubagg.h>
 #endif
 
 #define DEFAULT_CHUNK_SIZE (2 * 1024 * 1024)   // 2MB
@@ -22,25 +23,16 @@ typedef union {
     uint64_t user_ctx;
 } os_transport_user_data_t;
 
-struct buffer_info {
+typedef struct {
     uint64_t addr;             // 数据缓冲区地址
     urma_target_seg_t *tseg;   // 目标分段信息
-};
-
-// Placeholder stream type. Replace with real cudaStream_t from cuda_runtime.h when integrating CUDA runtime.
-typedef struct {
-    int i;
-} cudaStream_t;
-
-typedef struct {
-    int i;
-} cudaEvent_t;
+} ost_buffer_info_t;
 
 typedef struct {
     void *dst;             // 设备地址
     cudaStream_t stream;   // CUDA流
     cudaEvent_t event;     // CUDA事件
-} device_info_t;
+} ost_device_info_t;
 
 typedef enum jetty_mode { JETTY_MODE_SIMPLEX = 0, JETTY_MODE_DUPLEX } jetty_mode_t;
 
@@ -66,12 +58,12 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
 
 uint32_t os_transport_reg_jfc(urma_jfce_t *jfce, urma_jfc_t *jfc, void *handle);
 
-uint32_t os_transport_send(void *handle, struct urma_jetty_info *jetty_info,
-                           struct buffer_info *local_src, struct buffer_info *remote_dst,
+uint32_t os_transport_send(void *handle, urma_jetty_info_t *jetty_info,
+                           ost_buffer_info_t *local_src, ost_buffer_info_t *remote_dst,
                            uint32_t len, uint32_t server_key, uint32_t client_key,
                            task_sync_t **ret_sync_handle);
 
-uint32_t os_transport_recv(void *handle, struct buffer_info *host_src, device_info_t *device_dst,
+uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device_info_t *device_dst,
                            uint32_t len, uint32_t client_key, task_sync_t **ret_sync_handle);
 
 uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle);

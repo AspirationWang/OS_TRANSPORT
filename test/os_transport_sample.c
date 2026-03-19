@@ -1234,7 +1234,7 @@ static int client_recv_then_trigger_server(context_t *ctx)
     uint32_t len = (uint32_t)strlen(TEST_PAYLOAD) + 1;
     char device_buf[MSG_SIZE] = {0};
     struct buffer_info host_src = {0};
-    device_info_t device_dst = {0};
+    ost_device_info_t device_dst = {0};
     task_sync_t *sync = NULL;
 
     if (len > MSG_SIZE) {
