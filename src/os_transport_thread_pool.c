@@ -4,6 +4,7 @@
 #include <string.h>
 #include <errno.h>
 
+
 // 哈希函数
 static uint32_t hash_req_id(uint32_t req_id) {
     return (uint32_t)(req_id ^ (req_id >> 20)) % REQ_HASH_SIZE;
@@ -42,74 +43,47 @@ static uint64_t generate_task_id(ThreadPoolHandle pool) {
     return id;
 }
 
-// 扩展 worker 队列
-static bool worker_queue_expand(WorkerThread* worker, uint32_t new_cap) {
-    ThreadPoolTask** new_q = malloc(new_cap * sizeof(ThreadPoolTask*));
-    if (!new_q) return false;
-    uint32_t count = worker->queue_size;
-    for (uint32_t i = 0; i < count; i++) {
-        new_q[i] = worker->task_queue[(worker->queue_head + i) % worker->queue_cap];
-    }
-    free(worker->task_queue);
-    worker->task_queue = new_q;
-    worker->queue_head = 0;
-    worker->queue_tail = count;
-    worker->queue_cap = new_cap;
-    LOG_DEBUG("Worker %d queue expanded to %u", worker->worker_idx, new_cap);
-    return true;
-}
-
 // 向 worker 队列添加任务（必须已持有 worker->mutex）
 static bool worker_queue_push(WorkerThread* worker, ThreadPoolTask* task) {
-    if (worker->queue_size >= worker->queue_cap) {
-        uint32_t new_cap = worker->queue_cap * 2;
-        if (!worker_queue_expand(worker, new_cap)) return false;
+    TaskNode* node = malloc(sizeof(TaskNode));
+    if (!node) return false;
+    node->task = task;
+    node->next = NULL;
+
+    if (worker->queue_tail) {
+        worker->queue_tail->next = node;
+    } else {
+        worker->queue_head = node;
     }
-    worker->task_queue[worker->queue_tail] = task;
-    worker->queue_tail = (worker->queue_tail + 1) % worker->queue_cap;
+    worker->queue_tail = node;
     worker->queue_size++;
     LOG_DEBUG("Worker %d pushed task %lu (req=%u), queue size now %u",
               worker->worker_idx, task->task_id, task->request_id, worker->queue_size);
     return true;
 }
 
-// 回滚最近入队的若干任务（必须已持有 worker->mutex）
-static void rollback_worker_tail_tasks(WorkerThread* worker, uint32_t rollback_count) {
-    while (rollback_count > 0 && worker->queue_size > 0) {
-        uint32_t tail = (worker->queue_tail + worker->queue_cap - 1) % worker->queue_cap;
-        ThreadPoolTask* task = worker->task_queue[tail];
-        worker->task_queue[tail] = NULL;
-        worker->queue_tail = tail;
-        worker->queue_size--;
-        if (task) {
-            free(task->task_arg); // InternalTask
-            free(task);
-        }
-        rollback_count--;
-    }
-}
-
 // 从 worker 队列中取出指定 request_id 的第一个任务（必须已持有 worker->mutex）
 static ThreadPoolTask* worker_queue_pop_by_req(WorkerThread* worker, uint32_t req_id) {
-    if (worker->queue_size == 0) return NULL;
-    uint32_t idx = worker->queue_head;
-    for (uint32_t i = 0; i < worker->queue_size; i++) {
-        uint32_t pos = (idx + i) % worker->queue_cap;
-        ThreadPoolTask* task = worker->task_queue[pos];
-        if (task->request_id == req_id) {
-            // 找到目标任务，需要从队列中移除
-            // 将 pos 之后的元素向前移动
-            for (uint32_t j = i; j < worker->queue_size - 1; j++) {
-                uint32_t cur = (idx + j) % worker->queue_cap;
-                uint32_t nxt = (idx + j + 1) % worker->queue_cap;
-                worker->task_queue[cur] = worker->task_queue[nxt];
+    TaskNode* prev = NULL;
+    TaskNode* curr = worker->queue_head;
+    while (curr) {
+        if (curr->task->request_id == req_id) {
+            ThreadPoolTask* task = curr->task;
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                worker->queue_head = curr->next;
             }
-            // 调整尾指针
-            worker->queue_tail = (worker->queue_tail + worker->queue_cap - 1) % worker->queue_cap;
+            if (curr == worker->queue_tail) {
+                worker->queue_tail = prev;
+            }
             worker->queue_size--;
+            free(curr);
             LOG_DEBUG("Worker %d popped task %lu for req %u", worker->worker_idx, task->task_id, req_id);
             return task;
         }
+        prev = curr;
+        curr = curr->next;
     }
     LOG_DEBUG("Worker %d no task found for req %u", worker->worker_idx, req_id);
     return NULL;
@@ -176,6 +150,39 @@ static void remove_req_context(ThreadPoolHandle pool, uint32_t req_id) {
     pthread_mutex_unlock(&pool->req_hash_mutex);
 }
 
+// worker 执行任务并处理计数
+static void worker_process_task(WorkerThread* worker, ThreadPoolTask* task, uint32_t req_id) {
+    ThreadPoolHandle pool = worker->pool;
+
+    worker->state = WORKER_STATE_BUSY;
+    pthread_mutex_unlock(&worker->mutex);
+
+    task->task_func(task->task_arg);
+    task->is_completed = true;
+
+    RequestContext* ctx = find_req_context(pool, req_id);
+    if (ctx) {
+        pthread_mutex_lock(&pool->req_hash_mutex);
+        ctx->pending_count--;
+        if (ctx->pending_count == 0) {
+            TaskCompleteCb batch_cb = ctx->batch_cb;
+            void* batch_data = ctx->batch_user_data;
+            pthread_mutex_unlock(&pool->req_hash_mutex);
+            if (batch_cb) {
+                batch_cb(0, true, batch_data);
+            }
+            remove_req_context(pool, req_id);
+        } else {
+            pthread_mutex_unlock(&pool->req_hash_mutex);
+        }
+    }
+
+    free(task);
+
+    pthread_mutex_lock(&worker->mutex);
+    worker->state = WORKER_STATE_IDLE;
+}
+
 // worker 线程主函数
 static void* worker_routine(void* arg) {
     WorkerThread* worker = (WorkerThread*)arg;
@@ -184,10 +191,9 @@ static void* worker_routine(void* arg) {
 
     pthread_mutex_lock(&worker->mutex);
     worker->state = WORKER_STATE_IDLE;
-    pthread_cond_signal(&worker->cond_task); // 通知初始化线程
+    pthread_cond_signal(&worker->cond_task);
 
     while (1) {
-        // 等待通知（pending_req 非0 或 销毁）
         while (worker->pending_req == 0 && !pool->is_destroying) {
             pthread_cond_wait(&worker->cond_task, &worker->mutex);
         }
@@ -198,42 +204,12 @@ static void* worker_routine(void* arg) {
         }
 
         uint32_t req_to_exec = worker->pending_req;
-        worker->pending_req = 0; // 清空，等待下一个通知
+        worker->pending_req = 0;
 
         ThreadPoolTask* task = worker_queue_pop_by_req(worker, req_to_exec);
         if (task) {
-            worker->state = WORKER_STATE_BUSY;
-            pthread_mutex_unlock(&worker->mutex);
-
-            // 执行任务
-            task->task_func(task->task_arg);
-            task->is_completed = true;
-
-            // 处理该 request_id 的计数
-            RequestContext* ctx = find_req_context(pool, req_to_exec);
-            if (ctx) {
-                pthread_mutex_lock(&pool->req_hash_mutex);
-                ctx->pending_count--;
-                if (ctx->pending_count == 0) {
-                    TaskCompleteCb batch_cb = ctx->batch_cb;
-                    void* batch_data = ctx->batch_user_data;
-                    pthread_mutex_unlock(&pool->req_hash_mutex);
-                    if (batch_cb) {
-                        batch_cb(0, true, batch_data); // task_id=0 表示批次完成
-                    }
-                    remove_req_context(pool, req_to_exec);
-                } else {
-                    pthread_mutex_unlock(&pool->req_hash_mutex);
-                }
-            }
-
-            // 释放任务结构
-            free(task);
-
-            pthread_mutex_lock(&worker->mutex);
-            worker->state = WORKER_STATE_IDLE;
+            worker_process_task(worker, task, req_to_exec);
         }
-        // 继续循环，等待下一个通知
     }
     LOG_INFO("Worker %d exiting", worker->worker_idx);
     return NULL;
@@ -252,53 +228,81 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
     if (jfce && urma_event_mode) {
         cnt = urma_wait_jfc(jfce, 1, EPOLL_TIME, &ev_jfc);
         if (cnt < 0 || cnt > 1 || !ev_jfc || (cnt == 1 && ev_jfc != jfc)) {
-            LOG_ERROR("Faided to wait jfc. cnt = %d.", cnt);
+            LOG_ERROR("Failed to wait jfc. cnt = %d.", cnt);
             return -1;
         } else if (cnt == 0) {
-            LOG_ERROR("Wait jfc finished. cnt = %d.", cnt);
+            LOG_DEBUG("Wait jfc timeout.");
             return 0;
         }
         jfc = ev_jfc;
         try_cnt = 1;
     }
     if (!jfc) {
-        LOG_ERROR("Invailed jfc!");
+        LOG_ERROR("Invalid jfc!");
+        return -1;
     }
 
     for (uint32_t loop = 0; loop < try_cnt; loop++) {
-        cnt = urma_poll_jfc(jfc, cr_num, cr); /* 一次拉取的时候，可能存在多条数据 */
+        cnt = urma_poll_jfc(jfc, cr_num, cr);
         if (cnt == 0) {
             continue;
         } else if (cnt < 0) {
-            LOG_ERROR("Faided to poll jfc. cnt = %d.", cnt);
+            LOG_ERROR("Failed to poll jfc. cnt = %d.", cnt);
             return -1;
         } else if (cnt > 0 && (uint32_t)cnt <= cr_num) {
             if (urma_event_mode) {
-                /* 事件模式 */
                 urma_ack_jfc((urma_jfc_t **)(&jfc), &ack_cnt, 1);
                 urma_status_t status = urma_rearm_jfc(jfc, false);
                 if (status != URMA_SUCCESS) {
-                    LOG_ERROR("Faided to rearm jfc. ret = %d.", status);
+                    LOG_ERROR("Failed to rearm jfc. ret = %d.", status);
                     return -1;
                 }
             }
             for (int cr_loop = 0; cr_loop < cnt; cr_loop++) {
                 if (cr[cr_loop].status != URMA_SUCCESS) {
-                    LOG_ERROR("Faided to poll jfc. count = %d, ret = %d.", cr_loop, cr[cr_loop].status);
+                    LOG_ERROR("CR %d failed, status = %d.", cr_loop, cr[cr_loop].status);
                     return -1;
                 }
             }
         }
     }
     return cnt;
+#endif
+}
+
+// asyncPoll 处理单个事件
+static void async_poll_handle_event(ThreadPoolHandle pool, urma_cr_t* cr) {
+    TransportData user_data = {0};
+    urma_cr_opcode_t opcode = cr->opcode;
+    if (opcode == URMA_CR_OPC_WRITE_WITH_IMM) {
+        user_data = (TransportData)cr->imm_data;
+    } else if (opcode == URMA_CR_OPC_SEND) {
+        user_data = (TransportData)cr->user_ctx;
+    } else {
+        LOG_ERROR("Unknown opcode %d", opcode);
+        return;
+    }
+    uint32_t request_id = user_data.bs.request_id;
+    LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);
+
+    RequestContext* ctx = find_req_context(pool, request_id);
+    if (!ctx) {
+        LOG_WARN("No context for request_id %u", request_id);
+        return;
+    }
+    WorkerThread* worker = &pool->workers[ctx->worker_idx];
+    pthread_mutex_lock(&worker->mutex);
+    worker->pending_req = request_id;
+    pthread_cond_signal(&worker->cond_task);
+    pthread_mutex_unlock(&worker->mutex);
 }
 
 // asyncPoll 线程主函数
 static void* async_poll_routine(void* arg) {
     ThreadPoolHandle pool = (ThreadPoolHandle)arg;
-    urma_cr_t *cr = calloc(POLL_SIZE, sizeof(urma_cr_t));
+    urma_cr_t* cr = calloc(POLL_SIZE, sizeof(urma_cr_t));
     if (!cr) {
-        LOG_ERROR("calloc cr failed.");
+        LOG_ERROR("calloc cr failed");
         return NULL;
     }
     LOG_INFO("asyncPoll thread started");
@@ -311,59 +315,32 @@ static void* async_poll_routine(void* arg) {
     while (!pool->is_destroying) {
         int cnt = async_poll_routine_wait_poll(pool, cr, POLL_TRY_CNT, POLL_SIZE);
         if (cnt < 0) {
-            LOG_ERROR("Failed to run wait poll");
+            LOG_ERROR("async_poll_routine_wait_poll failed");
             break;
-        } else if (cnt == 0) {
-            continue;
         }
-        for (int loop = 0; loop < cnt; loop++) {
-            TransportData user_data = { 0 };
-            urma_cr_opcode_t opcode = cr[loop].opcode;
-            if (opcode == URMA_CR_OPC_WRITE_WITH_IMM) {
-                LOG_DEBUG("Opcode is URMA_CR_OPC_WRITE_WITH_IMM");
-                user_data = (TransportData)cr[loop].imm_data;
-            } else if (opcode == URMA_CR_OPC_SEND) {
-                LOG_DEBUG("Opcode is URMA_CR_OPC_SEND");
-                user_data = (TransportData)cr[loop].user_ctx;
-            } else {
-                LOG_ERROR("Error opcode");
-            }
-            uint32_t request_id = user_data.bs.request_id;
-            LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);
-            // 查找该 request_id 绑定的 worker
-            RequestContext* ctx = find_req_context(pool, request_id);
-            if (!ctx) {
-                LOG_WARN("No context found for request_id %u", request_id);
-                continue;
-            }
-            WorkerThread* worker = &pool->workers[ctx->worker_idx];
-            pthread_mutex_lock(&worker->mutex);
-            worker->pending_req = request_id;
-            pthread_cond_signal(&worker->cond_task);
-            pthread_mutex_unlock(&worker->mutex);
+        if (cnt == 0) continue;
+        for (int i = 0; i < cnt; i++) {
+            async_poll_handle_event(pool, &cr[i]);
         }
     }
 
+    free(cr);
     LOG_INFO("asyncPoll thread exiting");
     return NULL;
 }
 
-// 初始化线程池
-ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
-    (void)pending_queue_cap; // 不再使用 pending 队列
-    if (worker_queue_cap < 2) worker_queue_cap = 2;
-
-    ThreadPoolHandle pool = calloc(1, sizeof(struct _ThreadPool));
-    if (!pool) return NULL;
-
+// 初始化同步对象
+static void init_pool_sync(ThreadPoolHandle pool) {
     pthread_mutex_init(&pool->task_id_mutex, NULL);
     pthread_mutex_init(&pool->global_mutex, NULL);
     pthread_mutex_init(&pool->start_mutex, NULL);
     pthread_mutex_init(&pool->req_hash_mutex, NULL);
     pthread_cond_init(&pool->cond_interrupt, NULL);
     pthread_cond_init(&pool->cond_start, NULL);
+}
 
-    // 初始化 worker
+// 初始化 worker 基础结构
+static void init_workers_basic(ThreadPoolHandle pool) {
     for (int i = 0; i < 64; i++) {
         WorkerThread* w = &pool->workers[i];
         pthread_mutex_init(&w->mutex, NULL);
@@ -371,31 +348,118 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
         w->state = WORKER_STATE_INIT;
         w->worker_idx = i;
         w->pool = pool;
-        w->queue_cap = worker_queue_cap;
-        w->queue_head = w->queue_tail = w->queue_size = 0;
+        w->queue_head = w->queue_tail = NULL;
+        w->queue_size = 0;
         w->pending_req = 0;
-        w->task_queue = malloc(worker_queue_cap * sizeof(ThreadPoolTask*));
-        if (!w->task_queue) {
-            // 清理已分配的资源
-            for (int j = 0; j < i; j++) {
-                free(pool->workers[j].task_queue);
-                pthread_mutex_destroy(&pool->workers[j].mutex);
-                pthread_cond_destroy(&pool->workers[j].cond_task);
-            }
-            free(pool);
-            return NULL;
-        }
     }
+}
 
-    // 初始化通知队列（固定容量 64，可动态扩展，但为简化固定）
+// 初始化通知队列
+static bool init_notify_queue(ThreadPoolHandle pool) {
     pool->notify_queue_cap = 64;
     pool->notify_queue = malloc(pool->notify_queue_cap * sizeof(NotifyItem));
-    if (!pool->notify_queue) {
-        for (int i = 0; i < 64; i++) {
-            free(pool->workers[i].task_queue);
-            pthread_mutex_destroy(&pool->workers[i].mutex);
-            pthread_cond_destroy(&pool->workers[i].cond_task);
+    return (pool->notify_queue != NULL);
+}
+
+// 创建单个 worker 线程
+static bool create_worker(ThreadPoolHandle pool, int idx) {
+    WorkerThread* w = &pool->workers[idx];
+    pthread_mutex_lock(&w->mutex);
+    int ret = pthread_create(&w->tid, NULL, worker_routine, w);
+    if (ret != 0) {
+        LOG_ERROR("Failed to create worker %d", idx);
+        pthread_mutex_unlock(&w->mutex);
+        return false;
+    }
+    while (w->state == WORKER_STATE_INIT) {
+        pthread_cond_wait(&w->cond_task, &w->mutex);
+    }
+    pthread_mutex_unlock(&w->mutex);
+    return true;
+}
+
+// 创建所有 worker 线程
+static bool create_all_workers(ThreadPoolHandle pool) {
+    for (int i = 0; i < 64; i++) {
+        if (!create_worker(pool, i)) {
+            return false;
         }
+    }
+    return true;
+}
+
+// 销毁同步对象
+static void destroy_pool_sync(ThreadPoolHandle pool) {
+    pthread_mutex_destroy(&pool->task_id_mutex);
+    pthread_mutex_destroy(&pool->global_mutex);
+    pthread_mutex_destroy(&pool->start_mutex);
+    pthread_mutex_destroy(&pool->req_hash_mutex);
+    pthread_cond_destroy(&pool->cond_interrupt);
+    pthread_cond_destroy(&pool->cond_start);
+}
+
+// 设置销毁标志并唤醒所有线程
+static void shutdown_threads(ThreadPoolHandle pool) {
+    pthread_mutex_lock(&pool->global_mutex);
+    pool->is_destroying = true;
+    pthread_cond_broadcast(&pool->cond_interrupt);
+    pthread_mutex_unlock(&pool->global_mutex);
+
+    for (int i = 0; i < 64; i++) {
+        WorkerThread* w = &pool->workers[i];
+        pthread_mutex_lock(&w->mutex);
+        pthread_cond_signal(&w->cond_task);
+        pthread_mutex_unlock(&w->mutex);
+    }
+}
+
+// 销毁单个 worker 的队列和锁
+static void destroy_worker(WorkerThread* w) {
+    pthread_mutex_lock(&w->mutex);
+    TaskNode* curr = w->queue_head;
+    while (curr) {
+        TaskNode* next = curr->next;
+        free(curr->task->task_arg);
+        free(curr->task);
+        free(curr);
+        curr = next;
+    }
+    pthread_mutex_unlock(&w->mutex);
+    pthread_mutex_destroy(&w->mutex);
+    pthread_cond_destroy(&w->cond_task);
+}
+
+// 销毁所有 worker
+static void destroy_all_workers(ThreadPoolHandle handle) {
+    for (int i = 0; i < 64; i++) {
+        destroy_worker(&handle->workers[i]);
+    }
+}
+
+// 销毁哈希表
+static void destroy_hash_table(ThreadPoolHandle handle) {
+    for (int i = 0; i < REQ_HASH_SIZE; i++) {
+        RequestContext* ctx = handle->req_hash[i];
+        while (ctx) {
+            RequestContext* next = ctx->next;
+            free(ctx);
+            ctx = next;
+        }
+    }
+}
+
+// 初始化线程池
+ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_queue_cap) {
+    (void)pending_queue_cap;
+    (void)worker_queue_cap; // 链表不需要容量
+
+    ThreadPoolHandle pool = calloc(1, sizeof(struct _ThreadPool));
+    if (!pool) return NULL;
+
+    init_pool_sync(pool);
+    init_workers_basic(pool);
+
+    if (!init_notify_queue(pool)) {
         free(pool);
         return NULL;
     }
@@ -406,50 +470,16 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
     pool->is_running = false;
     pool->is_destroying = false;
 
-    // 创建所有 worker 线程
-    for (int i = 0; i < 64; i++) {
-        WorkerThread* w = &pool->workers[i];
-        pthread_mutex_lock(&w->mutex);
-        int ret = pthread_create(&w->tid, NULL, worker_routine, w);
-        if (ret != 0) {
-            LOG_ERROR("Failed to create worker %d", i);
-            pthread_mutex_unlock(&w->mutex);
-            // 清理
-            pool->is_destroying = true;
-            for (int j = 0; j < i; j++) {
-                pthread_mutex_lock(&pool->workers[j].mutex);
-                pthread_cond_signal(&pool->workers[j].cond_task);
-                pthread_mutex_unlock(&pool->workers[j].mutex);
-                pthread_join(pool->workers[j].tid, NULL);
-            }
-            // 释放资源
-            free(pool->notify_queue);
-            for (int j = 0; j < 64; j++) {
-                free(pool->workers[j].task_queue);
-                pthread_mutex_destroy(&pool->workers[j].mutex);
-                pthread_cond_destroy(&pool->workers[j].cond_task);
-            }
-            pthread_mutex_destroy(&pool->task_id_mutex);
-            pthread_mutex_destroy(&pool->global_mutex);
-            pthread_mutex_destroy(&pool->start_mutex);
-            pthread_mutex_destroy(&pool->req_hash_mutex);
-            pthread_cond_destroy(&pool->cond_interrupt);
-            pthread_cond_destroy(&pool->cond_start);
-            free(pool);
-            return NULL;
-        }
-        // 等待 worker 进入 IDLE 状态
-        while (w->state == WORKER_STATE_INIT) {
-            pthread_cond_wait(&w->cond_task, &w->mutex);
-        }
-        pthread_mutex_unlock(&w->mutex);
+    if (!create_all_workers(pool)) {
+        thread_pool_destroy(pool);
+        return NULL;
     }
 
     LOG_INFO("Thread pool initialized");
     return pool;
 }
 
-// 启动线程池（仅启动 asyncPoll）
+// 启动线程池
 int thread_pool_start(ThreadPoolHandle handle) {
     if (!handle || handle->is_running) return -1;
     pthread_mutex_lock(&handle->start_mutex);
@@ -469,8 +499,8 @@ int thread_pool_start(ThreadPoolHandle handle) {
 
 // 单任务提交
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
-                                        int (*task_func)(void*), void* task_arg,
-                                        TaskCompleteCb complete_cb, void* user_data) {
+                                  int (*task_func)(void*), void* task_arg,
+                                  TaskCompleteCb complete_cb, void* user_data) {
     if (!handle || !task_func || !handle->is_running) return 0;
 
     InternalTask* itask = malloc(sizeof(InternalTask));
@@ -496,22 +526,19 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
 
     WorkerThread* worker = select_best_worker(handle);
     if (!worker) {
-        LOG_ERROR("No worker available for task %lu", task->task_id);
-        free(task);
-        free(itask);
+        LOG_ERROR("No worker for task %lu", task->task_id);
+        free(task); free(itask);
         return 0;
     }
 
     pthread_mutex_lock(&worker->mutex);
     if (!worker_queue_push(worker, task)) {
         pthread_mutex_unlock(&worker->mutex);
-        free(task);
-        free(itask);
+        free(task); free(itask);
         return 0;
     }
     pthread_mutex_unlock(&worker->mutex);
 
-    // 更新 request_id 上下文
     RequestContext* ctx = find_req_context(handle, request_id);
     if (ctx) {
         pthread_mutex_lock(&handle->req_hash_mutex);
@@ -531,83 +558,115 @@ uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
     return task->task_id;
 }
 
-// 批量提交
-uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
-                                         ThreadPoolTask* tasks,
-                                         uint32_t task_count,
-                                         TaskCompleteCb complete_cb,
-                                         void* user_data,
-                                         TaskCompleteCb batch_complete_cb,
-                                         void* batch_user_data) {
-    if (!handle || !tasks || task_count == 0 || !handle->is_running) return NULL;
-    uint32_t req_id = tasks[0].request_id;
+// 创建单个批量任务节点
+static bool create_batch_node(ThreadPoolHandle handle, ThreadPoolTask* src,
+                              uint32_t req_id, TaskCompleteCb complete_cb, void* user_data,
+                              TaskNode** pnode, uint64_t* task_id) {
+    InternalTask* itask = malloc(sizeof(InternalTask));
+    if (!itask) return false;
+    itask->user_func = src->task_func;
+    itask->user_arg = src->task_arg;
+    itask->complete_cb = complete_cb;
+    itask->user_data = user_data;
+    itask->request_id = req_id;
+    itask->success = true;
+
+    ThreadPoolTask* task = malloc(sizeof(ThreadPoolTask));
+    if (!task) {
+        free(itask);
+        return false;
+    }
+    task->task_id = generate_task_id(handle);
+    task->request_id = req_id;
+    task->task_func = internal_task_wrapper;
+    task->task_arg = itask;
+    task->is_completed = false;
+    itask->task_id = task->task_id;
+    *task_id = task->task_id;
+
+    TaskNode* node = malloc(sizeof(TaskNode));
+    if (!node) {
+        free(task);
+        free(itask);
+        return false;
+    }
+    node->task = task;
+    node->next = NULL;
+    *pnode = node;
+    return true;
+}
+
+// 批量提交辅助：验证输入并选择 worker
+static bool validate_and_select_worker(ThreadPoolHandle handle, ThreadPoolTask* tasks,
+                                        uint32_t task_count, uint32_t* req_id,
+                                        WorkerThread** worker, uint64_t** task_ids) {
+    if (!handle || !tasks || task_count == 0 || !handle->is_running) return false;
+    *req_id = tasks[0].request_id;
     for (uint32_t i = 1; i < task_count; i++) {
-        if (tasks[i].request_id != req_id) {
-            LOG_ERROR("Batch tasks have inconsistent request_id");
+        if (tasks[i].request_id != *req_id) {
+            LOG_ERROR("Inconsistent request_id");
+            return false;
+        }
+    }
+    *task_ids = malloc(task_count * sizeof(uint64_t));
+    if (!*task_ids) return false;
+
+    *worker = select_best_worker(handle);
+    if (!*worker) {
+        free(*task_ids);
+        return false;
+    }
+    return true;
+}
+
+// 批量提交辅助：构造临时节点链表
+static TaskNode* build_batch_nodes(ThreadPoolHandle handle, ThreadPoolTask* tasks,
+                                    uint32_t task_count, uint32_t req_id,
+                                    TaskCompleteCb complete_cb, void* user_data,
+                                    uint64_t* task_ids, uint32_t* created) {
+    TaskNode* head = NULL;
+    TaskNode* tail = NULL;
+    *created = 0;
+    for (uint32_t i = 0; i < task_count; i++) {
+        TaskNode* node;
+        if (!create_batch_node(handle, &tasks[i], req_id, complete_cb, user_data, &node, &task_ids[i])) {
+            // 清理已创建的节点
+            while (head) {
+                TaskNode* tmp = head;
+                head = head->next;
+                free(tmp->task->task_arg);
+                free(tmp->task);
+                free(tmp);
+            }
             return NULL;
         }
-    }
-
-    uint64_t* task_ids = malloc(task_count * sizeof(uint64_t));
-    if (!task_ids) return NULL;
-
-    WorkerThread* target_worker = select_best_worker(handle);
-    if (!target_worker) {
-        free(task_ids);
-        return NULL;
-    }
-    int worker_idx = target_worker->worker_idx;
-    uint32_t pushed_count = 0;
-
-    pthread_mutex_lock(&target_worker->mutex);
-
-    bool success = true;
-    for (uint32_t i = 0; i < task_count; i++) {
-        InternalTask* itask = malloc(sizeof(InternalTask));
-        if (!itask) {
-            success = false;
-            break;
+        if (tail) {
+            tail->next = node;
+            tail = node;
+        } else {
+            head = tail = node;
         }
-        itask->user_func = tasks[i].task_func;
-        itask->user_arg = tasks[i].task_arg;
-        itask->complete_cb = complete_cb;
-        itask->user_data = user_data;
-        itask->request_id = req_id;
-        itask->success = true;
-
-        ThreadPoolTask* task = malloc(sizeof(ThreadPoolTask));
-        if (!task) {
-            free(itask);
-            success = false;
-            break;
-        }
-        task->task_id = generate_task_id(handle);
-        task->request_id = req_id;
-        task->task_func = internal_task_wrapper;
-        task->task_arg = itask;
-        task->is_completed = false;
-        itask->task_id = task->task_id;
-        task_ids[i] = task->task_id;
-
-        if (!worker_queue_push(target_worker, task)) {
-            free(task);
-            free(itask);
-            success = false;
-            break;
-        }
-        pushed_count++;
+        (*created)++;
     }
+    return head;
+}
 
-    if (!success) {
-        rollback_worker_tail_tasks(target_worker, pushed_count);
-        pthread_mutex_unlock(&target_worker->mutex);
-        free(task_ids);
-        return NULL;
+// 批量提交辅助：挂载节点到 worker 队列
+static void attach_nodes_to_worker(WorkerThread* worker, TaskNode* head, TaskNode* tail, uint32_t created) {
+    pthread_mutex_lock(&worker->mutex);
+    if (worker->queue_tail) {
+        worker->queue_tail->next = head;
+    } else {
+        worker->queue_head = head;
     }
+    worker->queue_tail = tail;
+    worker->queue_size += created;
+    pthread_mutex_unlock(&worker->mutex);
+}
 
-    pthread_mutex_unlock(&target_worker->mutex);
-
-    // 更新 request_id 上下文
+// 批量提交辅助：更新上下文
+static bool update_batch_context(ThreadPoolHandle handle, uint32_t req_id, int worker_idx,
+                                  uint32_t task_count, TaskCompleteCb batch_complete_cb, void* batch_user_data) {
     RequestContext* ctx = find_req_context(handle, req_id);
     if (ctx) {
         pthread_mutex_lock(&handle->req_hash_mutex);
@@ -615,6 +674,7 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         pthread_mutex_unlock(&handle->req_hash_mutex);
     } else {
         ctx = malloc(sizeof(RequestContext));
+        if (!ctx) return false;
         ctx->request_id = req_id;
         ctx->worker_idx = worker_idx;
         ctx->pending_count = task_count;
@@ -622,12 +682,46 @@ uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
         ctx->batch_user_data = batch_user_data;
         insert_req_context(handle, ctx);
     }
+    return true;
+}
 
-    LOG_DEBUG("Batch of %u tasks (req=%u) submitted to worker %d", task_count, req_id, worker_idx);
+// 批量提交主函数
+uint64_t* thread_pool_submit_batch_tasks(ThreadPoolHandle handle,
+                                         ThreadPoolTask* tasks,
+                                         uint32_t task_count,
+                                         TaskCompleteCb complete_cb,
+                                         void* user_data,
+                                         TaskCompleteCb batch_complete_cb,
+                                         void* batch_user_data) {
+    uint32_t req_id;
+    WorkerThread* target_worker;
+    uint64_t* task_ids;
+
+    if (!validate_and_select_worker(handle, tasks, task_count, &req_id, &target_worker, &task_ids)) {
+        return NULL;
+    }
+
+    uint32_t created = 0;
+    TaskNode* head = build_batch_nodes(handle, tasks, task_count, req_id, complete_cb, user_data, task_ids, &created);
+    if (!head) {
+        free(task_ids);
+        return NULL;
+    }
+
+    TaskNode* tail = head;
+    while (tail->next) tail = tail->next;
+
+    attach_nodes_to_worker(target_worker, head, tail, created);
+
+    if (!update_batch_context(handle, req_id, target_worker->worker_idx, task_count, batch_complete_cb, batch_user_data)) {
+        LOG_ERROR("Failed to update context for req %u", req_id);
+    }
+
+    LOG_DEBUG("Batch of %u tasks (req=%u) submitted to worker %d", task_count, req_id, target_worker->worker_idx);
     return task_ids;
 }
 
-// 通用通知接口（用于其他事件）
+// 通用通知接口
 int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data) {
     if (!handle || !handle->is_running) return -1;
     pthread_mutex_lock(&handle->global_mutex);
@@ -646,134 +740,96 @@ int async_poll_notify(ThreadPoolHandle handle, uint32_t notify_type, void* data)
     return 0;
 }
 
-// 销毁线程池
-void thread_pool_destroy(ThreadPoolHandle handle) {
-    if (!handle) return;
-    LOG_INFO("Destroying thread pool...");
-    pthread_mutex_lock(&handle->global_mutex);
-    handle->is_destroying = true;
-    pthread_cond_broadcast(&handle->cond_interrupt);
-    pthread_mutex_unlock(&handle->global_mutex);
-
-    // 唤醒所有 worker
-    for (int i = 0; i < 64; i++) {
-        WorkerThread* w = &handle->workers[i];
-        pthread_mutex_lock(&w->mutex);
-        pthread_cond_signal(&w->cond_task);
-        pthread_mutex_unlock(&w->mutex);
-    }
-
-    if (handle->async_poll_tid) pthread_join(handle->async_poll_tid, NULL);
-    for (int i = 0; i < 64; i++) {
-        WorkerThread* w = &handle->workers[i];
-        if (w->tid) pthread_join(w->tid, NULL);
-    }
-
-    // 释放队列中剩余任务
-    for (int i = 0; i < 64; i++) {
-        WorkerThread* w = &handle->workers[i];
-        pthread_mutex_lock(&w->mutex);
-        while (w->queue_size > 0) {
-            ThreadPoolTask* task = worker_queue_pop_by_req(w, UINT32_MAX); // 取任意任务
-            if (task) {
-                free(task->task_arg);
-                free(task);
+// 从 worker 队列中取消指定 request_id 的任务（返回移除数量）
+static uint32_t cancel_in_worker_queue(WorkerThread* worker, uint32_t req_id) {
+    pthread_mutex_lock(&worker->mutex);
+    TaskNode* prev = NULL;
+    TaskNode* curr = worker->queue_head;
+    uint32_t removed = 0;
+    while (curr) {
+        if (curr->task->request_id == req_id) {
+            TaskNode* to_free = curr;
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                worker->queue_head = curr->next;
             }
-        }
-        pthread_mutex_unlock(&w->mutex);
-        free(w->task_queue);
-        pthread_mutex_destroy(&w->mutex);
-        pthread_cond_destroy(&w->cond_task);
-    }
-
-    // 释放哈希表中的剩余上下文
-    for (int i = 0; i < REQ_HASH_SIZE; i++) {
-        RequestContext* ctx = handle->req_hash[i];
-        while (ctx) {
-            RequestContext* next = ctx->next;
-            free(ctx);
-            ctx = next;
+            curr = curr->next;
+            if (to_free == worker->queue_tail) {
+                worker->queue_tail = prev;
+            }
+            free(to_free->task->task_arg);
+            free(to_free->task);
+            free(to_free);
+            removed++;
+        } else {
+            prev = curr;
+            curr = curr->next;
         }
     }
+    worker->queue_size -= removed;
+    pthread_mutex_unlock(&worker->mutex);
+    return removed;
+}
 
-    free(handle->notify_queue);
-    pthread_mutex_destroy(&handle->task_id_mutex);
-    pthread_mutex_destroy(&handle->global_mutex);
-    pthread_mutex_destroy(&handle->start_mutex);
-    pthread_mutex_destroy(&handle->req_hash_mutex);
-    pthread_cond_destroy(&handle->cond_interrupt);
-    pthread_cond_destroy(&handle->cond_start);
-    free(handle);
-    LOG_INFO("Thread pool destroyed");
+// 取消后更新上下文
+static void update_context_after_cancel(ThreadPoolHandle handle, RequestContext* ctx,
+                                        uint32_t request_id, uint32_t removed) {
+    pthread_mutex_lock(&handle->req_hash_mutex);
+    ctx->pending_count -= removed;
+    if (ctx->pending_count == 0) {
+        uint32_t h = hash_req_id(request_id);
+        RequestContext** p = &handle->req_hash[h];
+        while (*p) {
+            if ((*p)->request_id == request_id) {
+                RequestContext* tmp = *p;
+                *p = tmp->next;
+                free(tmp);
+                break;
+            }
+            p = &(*p)->next;
+        }
+    }
+    pthread_mutex_unlock(&handle->req_hash_mutex);
 }
 
 // 根据 request_id 销毁所有未执行的任务
 int thread_pool_cancel_tasks_by_req(ThreadPoolHandle handle, uint32_t request_id) {
     if (!handle || !handle->is_running) {
-        LOG_ERROR("Invalid handle or thread pool not running");
+        LOG_ERROR("Invalid handle");
         return -1;
     }
 
-    // 查找该 request_id 对应的上下文
     RequestContext* ctx = find_req_context(handle, request_id);
     if (!ctx) {
-        LOG_DEBUG("No context found for request_id %u, nothing to cancel", request_id);
+        LOG_DEBUG("No context for req %u", request_id);
         return 0;
     }
 
-    int worker_idx = ctx->worker_idx;
-    WorkerThread* worker = &handle->workers[worker_idx];
-    uint32_t removed = 0;
-
-    pthread_mutex_lock(&worker->mutex);
-
-    // 遍历 worker 队列，移除所有匹配 request_id 的任务
-    uint32_t head = worker->queue_head;
-    uint32_t new_size = 0;
-    for (uint32_t i = 0; i < worker->queue_size; i++) {
-        uint32_t pos = (head + i) % worker->queue_cap;
-        ThreadPoolTask* task = worker->task_queue[pos];
-        if (task->request_id == request_id) {
-            // 释放任务内部结构和任务本身
-            free(task->task_arg); // InternalTask
-            free(task);
-            removed++;
-        } else {
-            uint32_t dest = (head + new_size) % worker->queue_cap;
-            if (dest != pos) {
-                worker->task_queue[dest] = task;
-            }
-            new_size++;
-        }
-    }
-
-    worker->queue_size = new_size;
-    worker->queue_tail = (head + new_size) % worker->queue_cap;
-    pthread_mutex_unlock(&worker->mutex);
-
+    uint32_t removed = cancel_in_worker_queue(&handle->workers[ctx->worker_idx], request_id);
     if (removed > 0) {
-        // 更新上下文中的 pending_count，如果变为0则移除上下文
-        pthread_mutex_lock(&handle->req_hash_mutex);
-        // ctx 指针仍然有效，因为我们在持有 worker 锁时找到了它，且现在持有 req_hash_mutex，不会被释放
-        ctx->pending_count -= removed;
-        if (ctx->pending_count == 0) {
-            // 从哈希表中移除该上下文
-            uint32_t h = hash_req_id(request_id);
-            RequestContext** p = &handle->req_hash[h];
-            while (*p) {
-                if ((*p)->request_id == request_id) {
-                    RequestContext* tmp = *p;
-                    *p = tmp->next;
-                    free(tmp);
-                    break;
-                }
-                p = &(*p)->next;
-            }
-        }
-        pthread_mutex_unlock(&handle->req_hash_mutex);
+        update_context_after_cancel(handle, ctx, request_id, removed);
+        LOG_DEBUG("Canceled %u tasks for req %u", removed, request_id);
+    }
+    return (int)removed;
+}
 
-        LOG_DEBUG("Canceled %u tasks for request_id %u", removed, request_id);
+// 销毁线程池
+void thread_pool_destroy(ThreadPoolHandle handle) {
+    if (!handle) return;
+    LOG_INFO("Destroying thread pool...");
+
+    shutdown_threads(handle);
+
+    if (handle->async_poll_tid) pthread_join(handle->async_poll_tid, NULL);
+    for (int i = 0; i < 64; i++) {
+        if (handle->workers[i].tid) pthread_join(handle->workers[i].tid, NULL);
     }
 
-    return (int)removed;
+    destroy_all_workers(handle);
+    destroy_hash_table(handle);
+    free(handle->notify_queue);
+    destroy_pool_sync(handle);
+    free(handle);
+    LOG_INFO("Thread pool destroyed");
 }
