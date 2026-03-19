@@ -216,7 +216,10 @@ static void test_interleaved_notifications(ThreadPoolHandle pool) {
     test_state_wait_batch(2);
 
     // 验证每个request_id内部顺序
-    int exec_a[TASKS_PER_REQ] = {0}, exec_b[TASKS_PER_REQ] = {0};
+    int exec_a[TASKS_PER_REQ];
+    int exec_b[TASKS_PER_REQ];
+    memset(exec_a, 0, sizeof(exec_a));
+    memset(exec_b, 0, sizeof(exec_b));
     int ca = 0, cb = 0;
     for (int i = 0; i < g_state.exec_index; i++) {
         int v = g_state.exec_order[i];
