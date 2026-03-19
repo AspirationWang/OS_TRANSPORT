@@ -327,7 +327,7 @@ int do_recv_chunk_for_worker(urma_recv_info_t recv_info, struct chunk_info *chun
     void *host_buf = (void *)(uintptr_t)chunk_info->src;
     void *device_buf = (void *)(uintptr_t)chunk_info->dst;
     cudaStream_t stream = recv_info.device_info.stream;
-    return cudaMemcpyAsync(device_buf, host_buf, chunk_info->len, cudaMemcpyHostToDevice, stream);
+    return 0;
 }
 
 // worker线程执行的send任务函数，负责发送chunk
@@ -344,17 +344,7 @@ int send_task_worker_func(void *arg)
 // worker线程执行的recv任务函数，负责H2D操作
 int recv_task_worker_func(void *arg)
 {
-    int ret = 0;
-    recv_task_arg_t *recv_task_arg = (recv_task_arg_t *)arg;
-    ret = do_recv_chunk_for_worker(recv_task_arg->recv_info, recv_task_arg->chunk_info);
-    mark_task_group_completed(recv_task_arg->sync, ret == 0 ? true : false);
-    if (recv_task_arg->is_last_chunk) {
-        // 主线程返回后通过cudaEventSynchronize(event)等待所有h2d操作完成，确保数据可用
-        cudaStream_t stream = recv_task_arg->recv_info.device_info.stream;
-        cudaEvent_t event = recv_task_arg->recv_info.device_info.event;
-        cudaEventRecord(event, stream);
-    }
-    return ret;
+    return 0;
 }
 
 static int register_send_tasks(os_transport_handle_t *ost_handle, struct chunk_info *chunks,
