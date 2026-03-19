@@ -185,7 +185,11 @@
      test_state_wait_completion();
      test_state_wait_batch(2);
  
-     int ea[N] = {0}, eb[N] = {0}, ca = 0, cb = 0;
+     int ea[N];
+     int eb[N];
+     memset(ea, 0, sizeof(ea));
+     memset(eb, 0, sizeof(eb));
+     int ca = 0, cb = 0;
      for (int i = 0; i < g_state.exec_index; i++) {
          int v = g_state.exec_order[i];
          if (v >= 100 && v < 200) ea[ca++] = v;
