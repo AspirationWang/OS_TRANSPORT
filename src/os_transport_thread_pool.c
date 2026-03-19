@@ -267,7 +267,6 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
         }
     }
     return cnt;
-#endif
 }
 
 // asyncPoll 处理单个事件
