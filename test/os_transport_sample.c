@@ -135,12 +135,12 @@ int cudaMemcpyAsync(void *dst, const void *src, size_t count, int kind, cudaStre
     return 0;
 }
 
-int cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
-{
-    (void)event;
-    (void)stream;
-    return 0;
-}
+// int cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
+// {
+//     (void)event;
+//     (void)stream;
+//     return 0;
+// }
 
 typedef struct context {
     /* 全局上下文：把一次 client 或 server 运行所需状态集中到一起 */
