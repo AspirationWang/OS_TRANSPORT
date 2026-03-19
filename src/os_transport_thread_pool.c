@@ -4,7 +4,7 @@
 #include <string.h>
 #include <errno.h>
 
-// #define TEST_MODE  // 测试模式由外部定义
+#define TEST_MODE  // 测试模式由外部定义
 
 #ifdef TEST_MODE
 #include <pthread.h>
