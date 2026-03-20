@@ -192,18 +192,27 @@ static int validate_recv_input(void *handle, ost_buffer_info_t *host_src, ost_de
     return 0;
 }
 
+// 发送单个chunk时，构建对应的write_info。
 static urma_write_info_t build_write_info(urma_jetty_info_t *jetty_info, ost_buffer_info_t *local_src,
-                                          ost_buffer_info_t *remote_dst, uint32_t server_key,
+                                          ost_buffer_info_t *remote_dst, uint32_t len, uint32_t server_key,
                                           uint32_t client_key)
 {
+    os_transport_user_data_t server_user_data = {.bs.request_id = server_key,
+                                                 .bs.chunk_type = NOT_SPLIT,
+                                                 .bs.chunk_id = 0,
+                                                 .bs.chunk_size = len};
+    os_transport_user_data_t client_user_data = {.bs.request_id = client_key,
+                                                 .bs.chunk_type = NOT_SPLIT,
+                                                 .bs.chunk_id = 0,
+                                                 .bs.chunk_size = len};
     urma_write_info_t write_info = {.jfs = jetty_info->jfs,
                                     .jetty = jetty_info->jetty,
                                     .target_jfr = jetty_info->tjetty,
                                     .dst_tseg = remote_dst->tseg,
                                     .src_tseg = local_src->tseg,
                                     .flag.value = 0,
-                                    .user_ctx_server = server_key,
-                                    .user_ctx_client = client_key};
+                                    .user_ctx_server = server_user_data.user_ctx,
+                                    .user_ctx_client = client_user_data.user_ctx};
     return write_info;
 }
 
@@ -285,19 +294,19 @@ void construct_send_task_arg(send_task_arg_t *arg, urma_write_info_t write_info,
     os_transport_user_data_t user_data_server = {0};
     os_transport_user_data_t user_data_client = {0};
 
-    user_data_server.bs.request_id = write_info.user_ctx_server;   // 将server_key作为request_id传入
+    user_data_server.bs.request_id = write_info.user_ctx_server.bs.request_id;   // 将server_key作为request_id传入
     user_data_server.bs.chunk_type = is_last_chunk ? LAST_CHUNK : MIDDLE_CHUNK;
     user_data_server.bs.chunk_id = chunk_id;
     user_data_server.bs.chunk_size = chunk_info->len;
 
-    user_data_client.bs.request_id = write_info.user_ctx_client;   // 将client_key作为request_id传入
+    user_data_client.bs.request_id = write_info.user_ctx_client.bs.request_id;   // 将client_key作为request_id传入
     user_data_client.bs.chunk_type = is_last_chunk ? LAST_CHUNK : MIDDLE_CHUNK;
     user_data_client.bs.chunk_id = chunk_id;
     user_data_client.bs.chunk_size = chunk_info->len;
 
     arg->write_info = write_info;
-    arg->write_info.user_ctx_server = user_data_server.user_ctx;
-    arg->write_info.user_ctx_client = user_data_client.user_ctx;
+    arg->write_info.user_ctx_server = user_data_server;
+    arg->write_info.user_ctx_client = user_data_client;
     arg->chunk_info = chunk_info;
     arg->is_last_chunk = is_last_chunk;
 
@@ -399,7 +408,7 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, chunk_info_t *
     for (uint64_t i = 0; i < task_num; i++) {
         uint64_t chunk_idx = i + 1;
         bool is_last_chunk = (chunk_idx == chunk_num - 1);
-        uint32_t request_id = (uint32_t)(urma_info.write_info.user_ctx_server);
+        uint32_t request_id = (uint32_t)(urma_info.write_info.user_ctx_server.bs.request_id);
 
         construct_send_task_arg(&task_args[i],
                                 urma_info.write_info,
@@ -416,7 +425,7 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, chunk_info_t *
     if (!task_ids) {
         OST_LOG_ERROR("Failed: thread_pool_submit_batch_tasks returned NULL "
                       "(request_id=%u, task_num=%lu).",
-                      (uint32_t)(urma_info.write_info.user_ctx_server),
+                      (uint32_t)(urma_info.write_info.user_ctx_server.bs.request_id),
                       task_num);
         free(task_group->task_args);
         free(task_group->tasks);
@@ -547,7 +556,7 @@ static int send_single_chunk(urma_jetty_info_t *jetty_info, ost_buffer_info_t *l
                              uint32_t client_key)
 {
     urma_write_info_t write_info =
-        build_write_info(jetty_info, local_src, remote_dst, server_key, client_key);
+        build_write_info(jetty_info, local_src, remote_dst, len, server_key, client_key);
     chunk_info_t chunk = {.src = local_src[0].addr, .dst = remote_dst[0].addr, .len = len};
     if (urma_write_with_notify(write_info, &chunk) != URMA_SUCCESS) {
         OST_LOG_ERROR("Failed: URMA write_with_notify returned failure "
@@ -698,7 +707,7 @@ uint32_t os_transport_send(void *handle, urma_jetty_info_t *jetty_info, ost_buff
         return ret;
     }
 
-    write_info = build_write_info(jetty_info, local_src, remote_dst, server_key, client_key);
+    write_info = build_write_info(jetty_info, local_src, remote_dst, len, server_key, client_key);
     memset(&urma_info, 0, sizeof(urma_info));
     urma_info.write_info = write_info;
 

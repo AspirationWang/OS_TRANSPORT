@@ -14,8 +14,8 @@ typedef struct {
     urma_target_seg_t *dst_tseg;
     urma_target_seg_t *src_tseg;
     urma_jfs_wr_flag_t flag;
-    uint32_t user_ctx_server;
-    uint32_t user_ctx_client;
+    os_transport_user_data_t user_ctx_server;
+    os_transport_user_data_t user_ctx_client;
 } urma_write_info_t;
 
 typedef struct {
