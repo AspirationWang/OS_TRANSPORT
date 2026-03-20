@@ -6,9 +6,9 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <cuda_runtime.h>
-#include <urma_api.h>
+#include <ub/umdk/urma/urma_api.h>
 #ifdef URMA_OVER_UB
-#    include <urma_ubagg.h>
+#    include <ub/umdk/urma/urma_ubagg.h>
 #endif
 
 #define DEFAULT_CHUNK_SIZE (2 * 1024 * 1024)   // 2MB
