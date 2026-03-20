@@ -1,6 +1,6 @@
 #include "os_transport_internal.h"
 
-urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_info *chunk_info){
+urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t *chunk_info){
     urma_sge_t src_sge = {
         .addr = chunk_info->src,
         .len = chunk_info->len,

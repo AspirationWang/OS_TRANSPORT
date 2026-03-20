@@ -315,7 +315,7 @@ static void test_update_and_validate_and_build(void)
     urma_jetty_info_t jetty_info = {0};
     struct buffer_info local_src = {0};
     struct buffer_info remote_dst = {0};
-    device_info_t device_dst = {0};
+    ost_device_info_t device_dst = {0};
     urma_write_info_t write_info;
     task_sync_t *sync_handle = NULL;
 
@@ -380,7 +380,7 @@ static void test_split_chunk_functions(void)
     struct buffer_info local = {0};
     struct buffer_info remote = {0};
     struct buffer_info host = {0};
-    device_info_t device = {0};
+    ost_device_info_t device = {0};
 
     assert(common_split_chunks(0x1000, 0x2000, DEFAULT_CHUNK_SIZE * 2 + 5, &chunks, &chunk_num) == 0);
     assert(chunks != NULL);
@@ -710,7 +710,7 @@ static void test_init_destroy_and_send_recv_api(void)
     struct buffer_info local_src = {0};
     struct buffer_info remote_dst = {0};
     struct buffer_info host_src = {0};
-    device_info_t device_dst = {0};
+    ost_device_info_t device_dst = {0};
     task_sync_t *sync = (task_sync_t *)0xDEADBEEF;
 
     reset_mocks();
