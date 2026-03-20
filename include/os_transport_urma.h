@@ -14,12 +14,12 @@ typedef struct {
     urma_target_seg_t *dst_tseg;
     urma_target_seg_t *src_tseg;
     urma_jfs_wr_flag_t flag;
-    uint32_t user_ctx_server;
-    uint32_t user_ctx_client;
+    os_transport_user_data_t user_ctx_server;
+    os_transport_user_data_t user_ctx_client;
 } urma_write_info_t;
 
 typedef struct {
-    device_info_t device_info; // 设备信息
+    ost_device_info_t device_info; // 设备信息
     uint32_t request_id;       // 请求ID
 } urma_recv_info_t;
 
@@ -29,14 +29,4 @@ typedef union {
 } urma_info_t;
 
 urma_status_t urma_write_with_notify(urma_write_info_t write_info, struct chunk_info *chunk_info);
-
-enum cudaMemcpyKind {
-    cudaMemcpyHostToHost = 0,
-    cudaMemcpyHostToDevice = 1,
-    cudaMemcpyDeviceToHost = 2,
-    cudaMemcpyDeviceToDevice = 3,
-    cudaMemcpyDefault = 4
-};
-
-int cudaMemcpyAsync(void *dst, const void *src, size_t count, enum cudaMemcpyKind kind, cudaStream_t stream);
 #endif   // OS_TRANSPORT_URMA_H
