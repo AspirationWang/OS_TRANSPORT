@@ -10,13 +10,44 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-implicit-function-declaration")
 # 收集所有源码
 file(GLOB SRC_FILES src/*.c)
 
+# 查找 URMA 库
+find_library(URMA_LIB urma
+    HINTS /usr/lib64 /usr/local/lib /opt/urma/lib /opt/urma/lib64
+    DOC "URMA library path"
+)
+if(NOT URMA_LIB)
+    message(WARNING "URMA library not found. Please ensure liburma.so is installed.")
+else()
+    message(STATUS "Found URMA library: ${URMA_LIB}")
+endif()
+
+# 查找 CUDA 运行时库
+find_library(CUDART_LIB cudart
+    HINTS /usr/local/cuda/lib64 /usr/lib/x86_64-linux-gnu /usr/lib64
+    DOC "CUDA runtime library path"
+)
+if(NOT CUDART_LIB)
+    message(WARNING "CUDA runtime library not found. Please ensure CUDA is installed.")
+else()
+    message(STATUS "Found CUDA runtime library: ${CUDART_LIB}")
+endif()
+
 # 编译动态库
 add_library(os_transport SHARED
     ${SRC_FILES}
 )
 
-# 链接pthread（线程依赖）
-target_link_libraries(os_transport pthread)
+# 链接pthread、urma、cuda
+target_link_libraries(os_transport
+    pthread
+    ${URMA_LIB}
+    ${CUDART_LIB}
+)
+
+# 如果未找到 URMA 或 CUDA，可允许继续构建（因为测试模式可能不需要），但这里不强制
+if(NOT URMA_LIB OR NOT CUDART_LIB)
+    message(WARNING "Missing required libraries. The built library may have undefined symbols.")
+endif()
 
 target_include_directories(os_transport
     PUBLIC
