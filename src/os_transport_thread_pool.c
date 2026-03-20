@@ -4,7 +4,7 @@
 #include <string.h>
 #include <errno.h>
 
-// #define TEST_MODE
+// #define TEST_MODE  // 由编译选项定义
 
 #ifdef TEST_MODE
 #include <pthread.h>
@@ -72,7 +72,6 @@ void mock_event_queue_destroy(void) {
     pthread_cond_destroy(&g_mock_queue.cond);
 }
 #endif
-
 
 // 哈希函数
 static uint32_t hash_req_id(uint32_t req_id) {
@@ -291,12 +290,11 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
     uint64_t req_id;
     int cnt = 0;
     while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
-        // 构造一个 TransportData，将 request_id 放入 bs.request_id
         TransportData td = {0};
-        td.bs.request_id = req_id;
-        cr[cnt].opcode = URMA_CR_OPC_SEND;  // 使用 SEND 类型，user_ctx 携带数据
+        td.bs.request_id = req_id;   // 将 request_id 填入联合体
+        cr[cnt].opcode = URMA_CR_OPC_SEND;
         cr[cnt].status = URMA_SUCCESS;
-        cr[cnt].user_ctx = td.user_ctx;
+        cr[cnt].user_ctx = td.user_ctx;   // 联合体的值赋给 user_ctx
         cr[cnt].imm_data = 0;
         cnt++;
     }
