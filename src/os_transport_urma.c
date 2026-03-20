@@ -21,7 +21,7 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t 
     };
     urma_rw_wr_t rw = {
         .src = src_sg,
-        .notify_data = write_info.user_ctx_client,
+        .notify_data = write_info.user_ctx_client.user_ctx,   // 将client_key作为notify_data传入，方便worker线程回调时区分不同请求
         .dst = dst_sg
     };
     urma_jfs_wr_t wr = {
@@ -29,7 +29,7 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t 
         .flag.bs.complete_enable = 1,
         .flag.bs.inline_flag = 0,
         .tjetty = write_info.target_jfr,
-        .user_ctx = write_info.user_ctx_server,
+        .user_ctx = write_info.user_ctx_server.user_ctx,   // 将server_key作为user_ctx传入，方便worker线程回调时区分不同请求
         .rw = rw,
         .next = NULL
     };

@@ -211,8 +211,8 @@ static urma_write_info_t build_write_info(urma_jetty_info_t *jetty_info, ost_buf
                                     .dst_tseg = remote_dst->tseg,
                                     .src_tseg = local_src->tseg,
                                     .flag.value = 0,
-                                    .user_ctx_server = server_user_data.user_ctx,
-                                    .user_ctx_client = client_user_data.user_ctx};
+                                    .user_ctx_server = server_user_data,
+                                    .user_ctx_client = client_user_data};
     return write_info;
 }
 
