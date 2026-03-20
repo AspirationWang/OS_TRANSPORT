@@ -127,21 +127,6 @@ typedef struct ctrl_request {
     uint64_t client_dst_addr;
 } __attribute__((packed)) ctrl_request_t;
 
-int cudaMemcpyAsync(void *dst, const void *src, size_t count, int kind, cudaStream_t stream)
-{
-    (void)kind;
-    (void)stream;
-    (void)memcpy(dst, src, count);
-    return 0;
-}
-
-int cudaEventRecord(cudaEvent_t event, cudaStream_t stream)
-{
-    (void)event;
-    (void)stream;
-    return 0;
-}
-
 typedef struct context {
     /* 全局上下文：把一次 client 或 server 运行所需状态集中到一起 */
     argument_t args;
@@ -735,8 +720,8 @@ static void *server_sock_thread_main(void *arg)
         (void)snprintf((char *)ctx->va + SERVER_SEND_OFFSET, MSG_SIZE, "%s", TEST_PAYLOAD);
 
         urma_jetty_info_t jetty_info = {0};
-        struct buffer_info local_src = {0};
-        struct buffer_info remote_dst = {0};
+        ost_buffer_info_t local_src = {0};
+        ost_buffer_info_t remote_dst = {0};
         task_sync_t *sync = NULL;
 
         jetty_info.jetty = ctx->jetty;
@@ -1233,7 +1218,7 @@ static int client_recv_then_trigger_server(context_t *ctx)
 {
     uint32_t len = (uint32_t)strlen(TEST_PAYLOAD) + 1;
     char device_buf[MSG_SIZE] = {0};
-    struct buffer_info host_src = {0};
+    ost_buffer_info_t host_src = {0};
     ost_device_info_t device_dst = {0};
     task_sync_t *sync = NULL;
 
