@@ -10,13 +10,12 @@
 #include <stdarg.h>
 #include <syslog.h>
 
-#define OST_SYSLOG_PRIO_DEBUG LOG_DEBUG
-#define OST_SYSLOG_PRIO_INFO LOG_INFO
-#define OST_SYSLOG_PRIO_WARNING LOG_WARNING
-#define OST_SYSLOG_PRIO_ERR LOG_ERR
-
-#undef LOG_DEBUG
-#undef LOG_INFO
+enum {
+    OST_SYSLOG_PRIO_DEBUG = LOG_DEBUG,
+    OST_SYSLOG_PRIO_INFO = LOG_INFO,
+    OST_SYSLOG_PRIO_WARNING = LOG_WARNING,
+    OST_SYSLOG_PRIO_ERR = LOG_ERR
+};
 
 typedef union {
     struct {
@@ -164,16 +163,16 @@ static inline void log_to_syslog(LogLevel level, const char* file, int line, con
 }
 
 // 日志格式化输出宏
-#define LOG(level, fmt, ...) do { \
+#define OST_LOG(level, fmt, ...) do { \
     if (level >= GLOBAL_LOG_LEVEL) { \
         log_to_syslog(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
     } \
 } while(0)
 
 // 快捷日志宏
-#define LOG_DEBUG(fmt, ...) LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  LOG(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  LOG(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+#define OST_LOG_DEBUG(fmt, ...) OST_LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define OST_LOG_INFO(fmt, ...)  OST_LOG(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
+#define OST_LOG_WARN(fmt, ...)  OST_LOG(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
+#define OST_LOG_ERROR(fmt, ...) OST_LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
 
 #endif // OS_TRANSPORT_THREAD_POOL_INTERNAL_H
