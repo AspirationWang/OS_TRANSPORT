@@ -309,11 +309,14 @@ static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, ui
 
     if (jfce && urma_event_mode) {
         cnt = urma_wait_jfc(jfce, 1, EPOLL_TIME, &ev_jfc);
-        if (cnt < 0 || cnt > 1 || !ev_jfc || (cnt == 1 && ev_jfc != jfc)) {
+        if (cnt < 0 || cnt > 1 || (cnt == 1 && ev_jfc != jfc)) {
             LOG_ERROR("Failed to wait jfc. cnt = %d.", cnt);
             return -1;
         } else if (cnt == 0) {
             LOG_DEBUG("Wait jfc timeout.");
+            return 0;
+        } else if (!ev_jfc) {
+            LOG_DEBUG("Null ev_jfc.");
             return 0;
         }
         jfc = ev_jfc;
