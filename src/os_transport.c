@@ -341,7 +341,15 @@ ThreadPoolTask construct_worker_task(uint64_t task_id, uint32_t request_id,
 
 int do_send_chunk_for_worker(urma_write_info_t write_info, chunk_info_t *chunk_info)
 {
-    return (int)urma_write_with_notify(write_info, chunk_info);
+    int ret = 0;
+    ret = (int)urma_write_with_notify(write_info, chunk_info);
+    if (ret != 0) {
+        OST_LOG_ERROR("Failed: urma_write_with_notify returned %d for request_id=%u, chunk_id=%lu.",
+                      ret,
+                      write_info.user_ctx_client.bs.request_id,
+                      write_info.user_ctx_client.bs.chunk_id);
+    }
+    return ret;
 }
 
 int do_recv_chunk_for_worker(urma_recv_info_t recv_info, chunk_info_t *chunk_info)
