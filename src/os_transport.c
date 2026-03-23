@@ -606,13 +606,14 @@ uint32_t os_transport_reg_jfc(urma_jfce_t *jfce, urma_jfc_t *jfc, void *handle)
 
 uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg, void **handle)
 {
-    os_transport_handle_t *ost_handle;
+    os_transport_handle_t *ost_handle = NULL;
 
     if (!ost_cfg || !handle) {
         OST_LOG_ERROR(
             "Failed: invalid arguments (ost_cfg=%p, handle=%p).", (void *)ost_cfg, (void *)handle);
         return -1;
     }
+    *handle = NULL;
     if (g_inited) {
         OST_LOG_ERROR("Failed: os_transport is already initialized.");
         return -1;
@@ -631,17 +632,14 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
     ost_handle->worker_thread_num = ost_cfg->worker_thread_num;
     ost_handle->urma_event_mode = ost_cfg->urma_event_mode;
 
+    g_inited = 1;
     // 先注册jfc信息，确保后续线程池和poll线程的初始化能够正确识别和处理事件
     if (os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void *)ost_handle) != 0) {
         OST_LOG_ERROR("Failed: os_transport_reg_jfc returned error "
                       "(jfce=%p, jfc=%p).",
                       (void *)ost_cfg->jfce,
                       (void *)ost_cfg->jfc);
-        g_inited = 0;
-        thread_pool_destroy(ost_handle->thread_pool);
-        ost_handle->thread_pool = NULL;
-        free(ost_handle);
-        return -1;
+        goto init_fail;
     }
 
     // 初始化线程池
@@ -651,18 +649,12 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
         OST_LOG_ERROR("Failed: thread_pool_init returned NULL "
                       "(worker_thread_num=%u).",
                       ost_cfg->worker_thread_num);
-        free(ost_handle);
-        return -1;
+        goto init_fail;
     }
     if (thread_pool_start(ost_handle->thread_pool) != 0) {
         OST_LOG_ERROR("Failed: thread_pool_start returned error.");
-        thread_pool_destroy(ost_handle->thread_pool);
-        ost_handle->thread_pool = NULL;
-        free(ost_handle);
-        return -1;
+        goto destroy_thread_pool;
     }
-
-    g_inited = 1;
 
     *handle = (void *)ost_handle;
     OST_LOG_INFO("Succeeded: handle=%p, worker_thread_num=%u, event_mode=%d.",
@@ -670,6 +662,14 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
                  ost_handle->worker_thread_num,
                  (int)ost_handle->urma_event_mode);
     return 0;
+
+destroy_thread_pool:
+    thread_pool_destroy(ost_handle->thread_pool);
+    ost_handle->thread_pool = NULL;
+init_fail:
+    g_inited = 0;
+    free(ost_handle);
+    return -1;
 }
 
 /*
