@@ -633,14 +633,6 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
     ost_handle->urma_event_mode = ost_cfg->urma_event_mode;
 
     g_inited = 1;
-    // 先注册jfc信息，确保后续线程池和poll线程的初始化能够正确识别和处理事件
-    if (os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void *)ost_handle) != 0) {
-        OST_LOG_ERROR("Failed: os_transport_reg_jfc returned error "
-                      "(jfce=%p, jfc=%p).",
-                      (void *)ost_cfg->jfce,
-                      (void *)ost_cfg->jfc);
-        goto init_fail;
-    }
 
     // 初始化线程池
     // worker_queue_cap: 每个Worker的任务队列容量; pending_queue_cap: 0表示使用默认值1024
@@ -651,6 +643,16 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
                       ost_cfg->worker_thread_num);
         goto init_fail;
     }
+
+    // 先注册jfc信息，确保线程池中poll线程能够正确识别和处理事件，后续send/recv接口调用时无需重复注册
+    if (os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void *)ost_handle) != 0) {
+        OST_LOG_ERROR("Failed: os_transport_reg_jfc returned error "
+                      "(jfce=%p, jfc=%p).",
+                      (void *)ost_cfg->jfce,
+                      (void *)ost_cfg->jfc);
+        goto init_fail;
+    }
+
     if (thread_pool_start(ost_handle->thread_pool) != 0) {
         OST_LOG_ERROR("Failed: thread_pool_start returned error.");
         goto destroy_thread_pool;
