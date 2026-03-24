@@ -790,10 +790,10 @@ uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device
     return 0;
 }
 
-uint32_t os_transport_wake_up_task(void *handle, void *cr)
+uint32_t os_transport_wake_up_task(void *handle, void *cr_t)
 {
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
-    urma_cr_t *cr = (urma_cr_t *)cr;
+    urma_cr_t *cr = (urma_cr_t *)cr_t;
     ThreadPoolHandle pool = ost_handle->thread_pool;
     TransportData user_data = {0};
     urma_cr_opcode_t opcode = cr->opcode;

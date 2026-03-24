@@ -732,7 +732,6 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
 
     shutdown_threads(handle);
 
-    if (handle->async_poll_tid) pthread_join(handle->async_poll_tid, NULL);
     for (int i = 0; i < 64; i++) {
         if (handle->workers[i].tid) pthread_join(handle->workers[i].tid, NULL);
     }
