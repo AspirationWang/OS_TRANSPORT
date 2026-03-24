@@ -391,6 +391,7 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, chunk_info_t *
                                uint64_t chunk_num, int (*task_func)(void *), urma_info_t urma_info,
                                task_sync_t *sync)
 {
+    // 第0个chunk由调用线程发送，剩余chunk注册为task供worker线程发送，因此task_num为chunk_num-1
     uint64_t task_num = chunk_num - 1;
     uint64_t *task_ids = NULL;
     task_group_t *task_group = NULL;
@@ -413,6 +414,7 @@ static int register_send_tasks(os_transport_handle_t *ost_handle, chunk_info_t *
     task_args = (send_task_arg_t *)task_group->task_args;
 
     sync->total_tasks = task_num;
+    // 从第1个chunk开始注册task，第0个chunk由调用线程发送，确保task_id与chunk_id保持一致，便于追踪和调试
     for (uint64_t i = 0; i < task_num; i++) {
         uint64_t chunk_idx = i + 1;
         bool is_last_chunk = (chunk_idx == chunk_num - 1);
