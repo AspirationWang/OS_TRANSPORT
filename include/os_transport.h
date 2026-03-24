@@ -69,6 +69,8 @@ uint32_t os_transport_send(void *handle, urma_jetty_info_t *jetty_info,
 uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device_info_t *device_dst,
                            uint32_t len, uint32_t client_key, task_sync_t **ret_sync_handle);
 
+int os_transport_wake_up_task(void *handle, void *cr_t);
+
 uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle);
 
 uint32_t os_transport_destroy(void *handle);

@@ -283,144 +283,12 @@ static void* worker_routine(void* arg) {
     return NULL;
 }
 
-/* 绑定jfc，用来等待事件 */
-static int async_poll_routine_wait_poll(ThreadPoolHandle pool, urma_cr_t *cr, uint32_t try_cnt, uint32_t cr_num)
-{
-#ifdef TEST_MODE
-    uint64_t req_id;
-    int cnt = 0;
-    while (cnt < (int)cr_num && mock_event_queue_pop(&req_id)) {
-        TransportData td = {0};
-        td.bs.request_id = req_id;   // 将 request_id 填入联合体
-        cr[cnt].opcode = URMA_CR_OPC_SEND;
-        cr[cnt].status = URMA_SUCCESS;
-        cr[cnt].user_ctx = td.user_ctx;   // 联合体的值赋给 user_ctx
-        cr[cnt].imm_data = 0;
-        cnt++;
-    }
-    return cnt;
-#else
-    bool urma_event_mode = pool->urmaInfo.urma_event_mode;
-    urma_jfce_t *jfce = pool->urmaInfo.jfce;
-    urma_jfc_t *jfc = pool->urmaInfo.jfc;
-    urma_jfc_t *ev_jfc = NULL;
-    uint32_t ack_cnt = 1;
-    int cnt = 0;
-
-    if (jfce && urma_event_mode) {
-        cnt = urma_wait_jfc(jfce, 1, EPOLL_TIME, &ev_jfc);
-        if (cnt < 0 || cnt > 1 || (cnt == 1 && ev_jfc != jfc)) {
-            OST_LOG_ERROR("Failed to wait jfc. cnt = %d.", cnt);
-            return -1;
-        } else if (cnt == 0) {
-            OST_LOG_DEBUG("Wait jfc timeout.");
-            return 0;
-        } else if (!ev_jfc) {
-            OST_LOG_DEBUG("Null ev_jfc.");
-            return 0;
-        }
-        jfc = ev_jfc;
-        try_cnt = 1;
-    }
-    if (!jfc) {
-        OST_LOG_ERROR("Invalid jfc!");
-        return -1;
-    }
-
-    for (uint32_t loop = 0; loop < try_cnt; loop++) {
-        cnt = urma_poll_jfc(jfc, cr_num, cr);
-        if (cnt == 0) {
-            continue;
-        } else if (cnt < 0) {
-            OST_LOG_ERROR("Failed to poll jfc. cnt = %d.", cnt);
-            return -1;
-        } else if (cnt > 0 && (uint32_t)cnt <= cr_num) {
-            if (urma_event_mode) {
-                urma_ack_jfc((urma_jfc_t **)(&jfc), &ack_cnt, 1);
-                urma_status_t status = urma_rearm_jfc(jfc, false);
-                if (status != URMA_SUCCESS) {
-                    OST_LOG_ERROR("Failed to rearm jfc. ret = %d.", status);
-                    return -1;
-                }
-            }
-            for (int cr_loop = 0; cr_loop < cnt; cr_loop++) {
-                if (cr[cr_loop].status != URMA_SUCCESS) {
-                    OST_LOG_ERROR("CR %d failed, status = %d.", cr_loop, cr[cr_loop].status);
-                    return -1;
-                }
-            }
-        }
-    }
-    return cnt;
-#endif
-}
-
-// asyncPoll 处理单个事件
-static void async_poll_handle_event(ThreadPoolHandle pool, urma_cr_t* cr) {
-    TransportData user_data = {0};
-    urma_cr_opcode_t opcode = cr->opcode;
-    if (opcode == URMA_CR_OPC_WRITE_WITH_IMM) {
-        user_data = (TransportData)cr->imm_data;
-    } else if (opcode == URMA_CR_OPC_SEND) {
-        user_data = (TransportData)cr->user_ctx;
-    } else {
-        OST_LOG_ERROR("Unknown opcode %d", opcode);
-        return;
-    }
-    uint32_t request_id = user_data.bs.request_id;
-    OST_LOG_DEBUG("asyncPoll received notification for request_id %u", request_id);
-
-    RequestContext* ctx = find_req_context(pool, request_id);
-    if (!ctx) {
-        OST_LOG_WARN("No context for request_id %u", request_id);
-        return;
-    }
-    WorkerThread* worker = &pool->workers[ctx->worker_idx];
-    pthread_mutex_lock(&worker->mutex);
-    worker->pending_req = request_id;
-    pthread_cond_signal(&worker->cond_task);
-    pthread_mutex_unlock(&worker->mutex);
-}
-
-// asyncPoll 线程主函数
-static void* async_poll_routine(void* arg) {
-    ThreadPoolHandle pool = (ThreadPoolHandle)arg;
-    urma_cr_t* cr = calloc(POLL_SIZE, sizeof(urma_cr_t));
-    if (!cr) {
-        OST_LOG_ERROR("calloc cr failed");
-        return NULL;
-    }
-    OST_LOG_INFO("asyncPoll thread started");
-
-    pthread_mutex_lock(&pool->start_mutex);
-    pool->is_started = true;
-    pthread_cond_signal(&pool->cond_start);
-    pthread_mutex_unlock(&pool->start_mutex);
-
-    while (!pool->is_destroying) {
-        int cnt = async_poll_routine_wait_poll(pool, cr, POLL_TRY_CNT, POLL_SIZE);
-        if (cnt < 0) {
-            OST_LOG_ERROR("async_poll_routine_wait_poll failed");
-            break;
-        }
-        if (cnt == 0) continue;
-        for (int i = 0; i < cnt; i++) {
-            async_poll_handle_event(pool, &cr[i]);
-        }
-    }
-
-    free(cr);
-    OST_LOG_INFO("asyncPoll thread exiting");
-    return NULL;
-}
-
 // 初始化同步对象
 static void init_pool_sync(ThreadPoolHandle pool) {
     pthread_mutex_init(&pool->task_id_mutex, NULL);
     pthread_mutex_init(&pool->global_mutex, NULL);
     pthread_mutex_init(&pool->start_mutex, NULL);
     pthread_mutex_init(&pool->req_hash_mutex, NULL);
-    pthread_cond_init(&pool->cond_interrupt, NULL);
     pthread_cond_init(&pool->cond_start, NULL);
 }
 
@@ -472,7 +340,6 @@ static void destroy_pool_sync(ThreadPoolHandle pool) {
     pthread_mutex_destroy(&pool->global_mutex);
     pthread_mutex_destroy(&pool->start_mutex);
     pthread_mutex_destroy(&pool->req_hash_mutex);
-    pthread_cond_destroy(&pool->cond_interrupt);
     pthread_cond_destroy(&pool->cond_start);
 }
 
@@ -480,7 +347,6 @@ static void destroy_pool_sync(ThreadPoolHandle pool) {
 static void shutdown_threads(ThreadPoolHandle pool) {
     pthread_mutex_lock(&pool->global_mutex);
     pool->is_destroying = true;
-    pthread_cond_broadcast(&pool->cond_interrupt);
     pthread_mutex_unlock(&pool->global_mutex);
 
     for (int i = 0; i < 64; i++) {
@@ -539,7 +405,6 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
 
     memset(pool->req_hash, 0, sizeof(pool->req_hash));
     pool->next_task_id = 1;
-    pool->is_initialized = true;
     pool->is_running = false;
     pool->is_destroying = false;
 
@@ -554,19 +419,27 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
 
 // 启动线程池
 int thread_pool_start(ThreadPoolHandle handle) {
-    if (!handle || handle->is_running) return -1;
-    pthread_mutex_lock(&handle->start_mutex);
-    int ret = pthread_create(&handle->async_poll_tid, NULL, async_poll_routine, handle);
-    if (ret != 0) {
-        pthread_mutex_unlock(&handle->start_mutex);
+    if (!handle || handle->is_running) {
         return -1;
     }
-    while (!handle->is_started) {
-        pthread_cond_wait(&handle->cond_start, &handle->start_mutex);
-    }
-    pthread_mutex_unlock(&handle->start_mutex);
     handle->is_running = true;
     OST_LOG_INFO("Thread pool started");
+    return 0;
+}
+
+int thread_pool_wake_up_worker_by_req_id(ThreadPoolHandle handle, uint32_t request_id)
+{
+    OST_LOG_INFO("Wake up worker thread, request id = %u.", request_id);
+    RequestContext* ctx = find_req_context(handle, request_id);
+    if (!ctx) {
+        OST_LOG_WARN("No context for request_id %u", request_id);
+        return -1;
+    }
+    WorkerThread* worker = &handle->workers[ctx->worker_idx];
+    pthread_mutex_lock(&worker->mutex);
+    worker->pending_req = request_id;
+    pthread_cond_signal(&worker->cond_task);
+    pthread_mutex_unlock(&worker->mutex);
     return 0;
 }
 
@@ -875,7 +748,6 @@ void thread_pool_destroy(ThreadPoolHandle handle) {
 
     shutdown_threads(handle);
 
-    if (handle->async_poll_tid) pthread_join(handle->async_poll_tid, NULL);
     for (int i = 0; i < 64; i++) {
         if (handle->workers[i].tid) pthread_join(handle->workers[i].tid, NULL);
     }
