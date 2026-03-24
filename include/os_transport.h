@@ -11,7 +11,9 @@
 #    include <ub/umdk/urma/urma_ubagg.h>
 #endif
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 #define DEFAULT_CHUNK_SIZE (2 * 1024 * 1024)   // 2MB
 
 typedef union {
@@ -71,5 +73,7 @@ uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle);
 
 uint32_t os_transport_destroy(void *handle);
 
+#ifdef __cplusplus
 }
+#endif
 #endif   // OS_TRANSPORT_H

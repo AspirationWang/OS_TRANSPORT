@@ -341,7 +341,15 @@ ThreadPoolTask construct_worker_task(uint64_t task_id, uint32_t request_id,
 
 int do_send_chunk_for_worker(urma_write_info_t write_info, chunk_info_t *chunk_info)
 {
-    return (int)urma_write_with_notify(write_info, chunk_info);
+    int ret = 0;
+    ret = (int)urma_write_with_notify(write_info, chunk_info);
+    if (ret != 0) {
+        OST_LOG_ERROR("Failed: urma_write_with_notify returned %d for request_id=%u, chunk_id=%lu.",
+                      ret,
+                      write_info.user_ctx_client.bs.request_id,
+                      write_info.user_ctx_client.bs.chunk_id);
+    }
+    return ret;
 }
 
 int do_recv_chunk_for_worker(urma_recv_info_t recv_info, chunk_info_t *chunk_info)
@@ -606,13 +614,14 @@ uint32_t os_transport_reg_jfc(urma_jfce_t *jfce, urma_jfc_t *jfc, void *handle)
 
 uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg, void **handle)
 {
-    os_transport_handle_t *ost_handle;
+    os_transport_handle_t *ost_handle = NULL;
 
     if (!ost_cfg || !handle) {
         OST_LOG_ERROR(
             "Failed: invalid arguments (ost_cfg=%p, handle=%p).", (void *)ost_cfg, (void *)handle);
         return -1;
     }
+    *handle = NULL;
     if (g_inited) {
         OST_LOG_ERROR("Failed: os_transport is already initialized.");
         return -1;
@@ -631,6 +640,8 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
     ost_handle->worker_thread_num = ost_cfg->worker_thread_num;
     ost_handle->urma_event_mode = ost_cfg->urma_event_mode;
 
+    g_inited = 1;
+
     // 初始化线程池
     // worker_queue_cap: 每个Worker的任务队列容量; pending_queue_cap: 0表示使用默认值1024
     ost_handle->thread_pool = thread_pool_init(ost_cfg->worker_thread_num, 0);
@@ -638,36 +649,37 @@ uint32_t os_transport_init(urma_context_t *urma_ctx, os_transport_cfg_t *ost_cfg
         OST_LOG_ERROR("Failed: thread_pool_init returned NULL "
                       "(worker_thread_num=%u).",
                       ost_cfg->worker_thread_num);
-        free(ost_handle);
-        return -1;
-    }
-    if (thread_pool_start(ost_handle->thread_pool) != 0) {
-        OST_LOG_ERROR("Failed: thread_pool_start returned error.");
-        thread_pool_destroy(ost_handle->thread_pool);
-        ost_handle->thread_pool = NULL;
-        free(ost_handle);
-        return -1;
+        goto init_fail;
     }
 
-    g_inited = 1;
-    // 先置为已初始化，再注册jfc
+    // 先注册jfc信息，确保线程池中poll线程能够正确识别和处理事件，后续send/recv接口调用时无需重复注册
     if (os_transport_reg_jfc(ost_cfg->jfce, ost_cfg->jfc, (void *)ost_handle) != 0) {
         OST_LOG_ERROR("Failed: os_transport_reg_jfc returned error "
                       "(jfce=%p, jfc=%p).",
                       (void *)ost_cfg->jfce,
                       (void *)ost_cfg->jfc);
-        g_inited = 0;
-        thread_pool_destroy(ost_handle->thread_pool);
-        ost_handle->thread_pool = NULL;
-        free(ost_handle);
-        return -1;
+        goto init_fail;
     }
+
+    if (thread_pool_start(ost_handle->thread_pool) != 0) {
+        OST_LOG_ERROR("Failed: thread_pool_start returned error.");
+        goto destroy_thread_pool;
+    }
+
     *handle = (void *)ost_handle;
     OST_LOG_INFO("Succeeded: handle=%p, worker_thread_num=%u, event_mode=%d.",
                  (void *)ost_handle,
                  ost_handle->worker_thread_num,
                  (int)ost_handle->urma_event_mode);
     return 0;
+
+destroy_thread_pool:
+    thread_pool_destroy(ost_handle->thread_pool);
+    ost_handle->thread_pool = NULL;
+init_fail:
+    g_inited = 0;
+    free(ost_handle);
+    return -1;
 }
 
 /*

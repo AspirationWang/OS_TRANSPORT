@@ -7,8 +7,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <time.h>
 #include <stdarg.h>
+#include <syslog.h>
+
+enum {
+    OST_SYSLOG_PRIO_DEBUG = LOG_DEBUG,
+    OST_SYSLOG_PRIO_INFO = LOG_INFO,
+    OST_SYSLOG_PRIO_WARNING = LOG_WARNING,
+    OST_SYSLOG_PRIO_ERR = LOG_ERR
+};
 
 typedef union {
     struct {
@@ -123,34 +130,49 @@ typedef enum {
 #define GLOBAL_LOG_LEVEL LOG_LEVEL_DEBUG
 #endif
 
-// 获取当前时间字符串
-static inline const char* get_log_time() {
-    static char time_buf[32];
-    time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", tm_info);
-    return time_buf;
+static inline int log_level_to_syslog_priority(LogLevel level) {
+    switch (level) {
+        case LOG_LEVEL_DEBUG:
+            return OST_SYSLOG_PRIO_DEBUG;
+        case LOG_LEVEL_INFO:
+            return OST_SYSLOG_PRIO_INFO;
+        case LOG_LEVEL_WARN:
+            return OST_SYSLOG_PRIO_WARNING;
+        case LOG_LEVEL_ERROR:
+            return OST_SYSLOG_PRIO_ERR;
+        default:
+            return OST_SYSLOG_PRIO_INFO;
+    }
+}
+
+static inline void init_syslog_logger_once(void) {
+    openlog("os_transport", LOG_PID | LOG_NDELAY, LOG_USER);
+}
+
+static inline void log_to_syslog(LogLevel level, const char* file, int line, const char* fmt, ...) {
+    static pthread_once_t log_init_once = PTHREAD_ONCE_INIT;
+    pthread_once(&log_init_once, init_syslog_logger_once);
+
+    char msg_buf[1024];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+    va_end(args);
+
+    syslog(log_level_to_syslog_priority(level), "[%s:%d] %s", file, line, msg_buf);
 }
 
 // 日志格式化输出宏
-#define LOG(level, fmt, ...) do { \
+#define OST_LOG(level, fmt, ...) do { \
     if (level >= GLOBAL_LOG_LEVEL) { \
-        const char* level_str = NULL; \
-        switch(level) { \
-            case LOG_LEVEL_DEBUG: level_str = "DEBUG"; break; \
-            case LOG_LEVEL_INFO:  level_str = "INFO";  break; \
-            case LOG_LEVEL_WARN:  level_str = "WARN";  break; \
-            case LOG_LEVEL_ERROR: level_str = "ERROR"; break; \
-        } \
-        fprintf(stderr, "[%s][%s][%s:%d] " fmt "\n", \
-            get_log_time(), level_str, __FILE__, __LINE__, ##__VA_ARGS__); \
+        log_to_syslog(level, __FILE__, __LINE__, fmt, ##__VA_ARGS__); \
     } \
 } while(0)
 
 // 快捷日志宏
-#define LOG_DEBUG(fmt, ...) LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...)  LOG(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
-#define LOG_WARN(fmt, ...)  LOG(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
+#define OST_LOG_DEBUG(fmt, ...) OST_LOG(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
+#define OST_LOG_INFO(fmt, ...)  OST_LOG(LOG_LEVEL_INFO,  fmt, ##__VA_ARGS__)
+#define OST_LOG_WARN(fmt, ...)  OST_LOG(LOG_LEVEL_WARN,  fmt, ##__VA_ARGS__)
+#define OST_LOG_ERROR(fmt, ...) OST_LOG(LOG_LEVEL_ERROR, fmt, ##__VA_ARGS__)
 
 #endif // OS_TRANSPORT_THREAD_POOL_INTERNAL_H
