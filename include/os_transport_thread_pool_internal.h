@@ -90,9 +90,7 @@ typedef struct {
  */
 struct _ThreadPool {
     // 线程基础配置
-    pthread_t async_poll_tid;       // asyncPoll线程ID
     WorkerThread workers[64];        // 64个Worker线程
-    bool is_initialized;            // 初始化完成标记
     bool is_running;                // 线程池运行标记
     bool is_destroying;             // 销毁标记
 
@@ -102,12 +100,10 @@ struct _ThreadPool {
 
     // 中断&同步控制
     pthread_mutex_t global_mutex;   // 全局锁（用于通知队列等）
-    pthread_cond_t cond_interrupt;  // 外部中断条件（保留，当前未使用）
 
     // 线程启动同步
     pthread_cond_t cond_start;      // 线程启动信号
     pthread_mutex_t start_mutex;    // 启动控制锁
-    bool is_started;                // asyncPoll是否已启动
 
     // URMA 相关信息
     ThreadPoolUrmaInfo urmaInfo;
