@@ -32,7 +32,8 @@ typedef struct {
 } ost_buffer_info_t;
 
 typedef struct {
-    void *dst;             // 设备地址
+    urma_jfr_t *jfr;       // 用于接收的jfr
+    void *dst;             // CUDA设备地址
     cudaStream_t stream;   // CUDA流
     cudaEvent_t event;     // CUDA事件
 } ost_device_info_t;

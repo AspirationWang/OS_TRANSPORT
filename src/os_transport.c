@@ -383,6 +383,14 @@ int recv_task_worker_func(void *arg)
         cudaStream_t stream = recv_task_arg->recv_info.device_info.stream;
         cudaEvent_t event = recv_task_arg->recv_info.device_info.event;
         cudaEventRecord(event, stream);
+    } else {
+        // 不是最后一个chunk时，调用urma_recv_with_notify，用于接收下一个分片
+        if (urma_recv_with_notify(recv_task_arg->recv_info, recv_task_arg->chunk_info) != URMA_SUCCESS) {
+            OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
+                          "(len=%u, client_key=%u).",
+                          recv_task_arg->chunk_info->len,
+                          recv_task_arg->recv_info.request_id);
+        }
     }
     return ret;
 }
@@ -775,7 +783,8 @@ uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device
         return -1;
     }
 
-    urma_info.recv_info = (urma_recv_info_t){.device_info = *device_dst, .request_id = client_key};
+    urma_info.recv_info = (urma_recv_info_t){
+        .jfr = device_dst->jfr, .local_tseg = host_src->tseg, .device_info = *device_dst, .request_id = client_key};
 
     if (register_tasks_and_bind_chunks(ost_handle,
                                        chunks,
@@ -789,6 +798,19 @@ uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device
     }
 
     *ret_sync_handle = sync_handle;
+    if (urma_recv_with_notify(urma_info.recv_info, &chunks[0]) != URMA_SUCCESS) {
+        OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
+                      "(len=%u, chunk_count=%lu, client_key=%u).",
+                      len,
+                      chunks_num,
+                      client_key);
+        // 如果recv提交失败，应该直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
+        pthread_mutex_lock(&sync_handle->mutex);
+        sync_handle->request_completed = 1;
+        pthread_cond_signal(&sync_handle->cond);
+        pthread_mutex_unlock(&sync_handle->mutex);
+        return -1;
+    }
     return 0;
 }
 

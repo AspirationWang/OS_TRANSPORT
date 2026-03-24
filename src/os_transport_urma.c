@@ -1,6 +1,7 @@
 #include "os_transport_internal.h"
 
-urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t *chunk_info){
+urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t *chunk_info)
+{
     urma_sge_t src_sge = {
         .addr = chunk_info->src,
         .len = chunk_info->len,
@@ -38,6 +39,30 @@ urma_status_t urma_write_with_notify(urma_write_info_t write_info, chunk_info_t 
         return urma_post_jfs_wr(write_info.jfs, &wr, &bad_wr);
     else if (write_info.jetty)
         return urma_post_jetty_send_wr(write_info.jetty, &wr, &bad_wr);
+    else
+        return URMA_FAIL;
+}
+
+urma_status_t urma_recv_with_notify(urma_recv_info_t recv_info, chunk_info_t *chunk_info){
+    urma_sge_t src_sge = {
+        .addr = (uint64_t)chunk_info->src,
+        .len = chunk_info->len,
+        .tseg = recv_info.local_tseg
+    };
+    urma_sg_t src_sg = {
+        .sge = &src_sge,
+        .num_sge = 1
+    };
+    urma_jfr_wr_t wr = {
+        .src = src_sg,
+        .user_ctx = recv_info.request_id,   // TODO：此处的user_ctx有什么作用？
+        .next = NULL
+    };
+    urma_jfr_wr_t *bad_wr;
+    
+    if (recv_info.jfr)
+        // 目前先只实现jfr的recv接口，后续如果jetty也需要支持再加
+        return urma_post_jfr_wr(recv_info.jfr, &wr, &bad_wr);
     else
         return URMA_FAIL;
 }
