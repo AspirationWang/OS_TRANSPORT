@@ -45,6 +45,14 @@ ThreadPoolHandle thread_pool_init(uint32_t worker_queue_cap, uint32_t pending_qu
 int thread_pool_start(ThreadPoolHandle handle);
 
 /**
+ * @brief 基于req_id找到对应的worker上下文，并唤醒对应的worker线程
+ * @param handle 线程池句柄
+ * @param request_id request_id
+ * @return 0=成功，-1=失败
+ */
+int thread_pool_wake_up_worker_by_req_id(ThreadPoolHandle handle, uint32_t request_id);
+
+/**
  * @brief 外部提交单个任务
  * @param handle 线程池句柄
  * @param request_id 请求ID

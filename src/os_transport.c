@@ -806,17 +806,8 @@ int os_transport_wake_up_task(void *handle, void *cr_t)
         return -1;
     }
     uint32_t request_id = user_data.bs.request_id;
-    RequestContext* ctx = find_req_context(pool, request_id);
-    if (!ctx) {
-        OST_LOG_WARN("No context for request_id %u", request_id);
-        return -1;
-    }
-    WorkerThread* worker = &pool->workers[ctx->worker_idx];
-    pthread_mutex_lock(&worker->mutex);
-    worker->pending_req = request_id;
-    pthread_cond_signal(&worker->cond_task);
-    pthread_mutex_unlock(&worker->mutex);
-    return 0;
+    
+    return thread_pool_wake_up_worker_by_req_id(pool, request_id);
 }
 
 uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle)

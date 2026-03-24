@@ -427,6 +427,22 @@ int thread_pool_start(ThreadPoolHandle handle) {
     return 0;
 }
 
+int thread_pool_wake_up_worker_by_req_id(ThreadPoolHandle handle, uint32_t request_id)
+{
+    OST_LOG_INFO("Wake up worker thread, request id = %u.", request_id);
+    RequestContext* ctx = find_req_context(handle, request_id);
+    if (!ctx) {
+        OST_LOG_WARN("No context for request_id %u", request_id);
+        return -1;
+    }
+    WorkerThread* worker = &pool->workers[ctx->worker_idx];
+    pthread_mutex_lock(&worker->mutex);
+    worker->pending_req = request_id;
+    pthread_cond_signal(&worker->cond_task);
+    pthread_mutex_unlock(&worker->mutex);
+    return 0;
+}
+
 // 单任务提交
 uint64_t thread_pool_submit_task(ThreadPoolHandle handle, uint32_t request_id,
                                   int (*task_func)(void*), void* task_arg,
