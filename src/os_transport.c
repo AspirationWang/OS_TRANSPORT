@@ -790,7 +790,7 @@ uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device
     return 0;
 }
 
-uint32_t os_transport_wake_up_task(void *handle, void *cr_t)
+int os_transport_wake_up_task(void *handle, void *cr_t)
 {
     os_transport_handle_t *ost_handle = (os_transport_handle_t *)handle;
     urma_cr_t *cr = (urma_cr_t *)cr_t;
@@ -803,19 +803,20 @@ uint32_t os_transport_wake_up_task(void *handle, void *cr_t)
         user_data = (TransportData)cr->user_ctx;
     } else {
         OST_LOG_ERROR("Unknown opcode %d", opcode);
-        return;
+        return -1;
     }
     uint32_t request_id = user_data.bs.request_id;
     RequestContext* ctx = find_req_context(pool, request_id);
     if (!ctx) {
         OST_LOG_WARN("No context for request_id %u", request_id);
-        return;
+        return -1;
     }
     WorkerThread* worker = &pool->workers[ctx->worker_idx];
     pthread_mutex_lock(&worker->mutex);
     worker->pending_req = request_id;
     pthread_cond_signal(&worker->cond_task);
     pthread_mutex_unlock(&worker->mutex);
+    return 0;
 }
 
 uint32_t wait_and_free_sync(void *handle, task_sync_t *sync_handle)
