@@ -435,7 +435,7 @@ int thread_pool_wake_up_worker_by_req_id(ThreadPoolHandle handle, uint32_t reque
         OST_LOG_WARN("No context for request_id %u", request_id);
         return -1;
     }
-    WorkerThread* worker = handle->workers[ctx->worker_idx];
+    WorkerThread* worker = &handle->workers[ctx->worker_idx];
     pthread_mutex_lock(&worker->mutex);
     worker->pending_req = request_id;
     pthread_cond_signal(&worker->cond_task);
