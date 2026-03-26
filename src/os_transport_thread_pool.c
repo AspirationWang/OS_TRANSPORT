@@ -223,7 +223,6 @@ static void worker_process_task(WorkerThread* worker, ThreadPoolTask* task, uint
     ThreadPoolHandle pool = worker->pool;
 
     worker->state = WORKER_STATE_BUSY;
-    pthread_mutex_unlock(&worker->mutex);
 
     task->task_func(task->task_arg);
     task->is_completed = true;
@@ -246,8 +245,6 @@ static void worker_process_task(WorkerThread* worker, ThreadPoolTask* task, uint
     }
 
     free(task);
-
-    pthread_mutex_lock(&worker->mutex);
     worker->state = WORKER_STATE_IDLE;
 }
 
