@@ -384,13 +384,13 @@ int recv_task_worker_func(void *arg)
         cudaEvent_t event = recv_task_arg->recv_info.device_info.event;
         cudaEventRecord(event, stream);
     } else {
-        // 不是最后一个chunk时，调用urma_recv_with_notify，用于接收下一个分片
-        if (urma_recv_with_notify(recv_task_arg->recv_info, recv_task_arg->chunk_info) != URMA_SUCCESS) {
-            OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
-                          "(len=%u, client_key=%u).",
-                          recv_task_arg->chunk_info->len,
-                          recv_task_arg->recv_info.request_id);
-        }
+        // // 不是最后一个chunk时，调用urma_recv_with_notify，用于接收下一个分片
+        // if (urma_recv_with_notify(recv_task_arg->recv_info, recv_task_arg->chunk_info) != URMA_SUCCESS) {
+        //     OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
+        //                   "(len=%u, client_key=%u).",
+        //                   recv_task_arg->chunk_info->len,
+        //                   recv_task_arg->recv_info.request_id);
+        // }
     }
     return ret;
 }
@@ -729,7 +729,7 @@ uint32_t os_transport_send(void *handle, urma_jetty_info_t *jetty_info, ost_buff
         return ret;
     }
 
-    write_info = build_write_info(jetty_info, local_src, remote_dst, len, server_key, client_key);
+    write_info = build_write_info(jetty_info, local_src, remote_dst, chunks[0].len, server_key, client_key);
     memset(&urma_info, 0, sizeof(urma_info));
     urma_info.write_info = write_info;
 
@@ -798,19 +798,22 @@ uint32_t os_transport_recv(void *handle, ost_buffer_info_t *host_src, ost_device
     }
 
     *ret_sync_handle = sync_handle;
-    if (urma_recv_with_notify(urma_info.recv_info, &chunks[0]) != URMA_SUCCESS) {
-        OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
-                      "(len=%u, chunk_count=%lu, client_key=%u).",
-                      len,
-                      chunks_num,
-                      client_key);
-        // 如果recv提交失败，应该直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
-        pthread_mutex_lock(&sync_handle->mutex);
-        sync_handle->request_completed = 1;
-        pthread_cond_signal(&sync_handle->cond);
-        pthread_mutex_unlock(&sync_handle->mutex);
-        return -1;
+    for (uint64_t i = 0; i < chunks_num; i++) {
+        if (urma_recv_with_notify(urma_info.recv_info, &chunks[i]) != URMA_SUCCESS) {
+            OST_LOG_ERROR("Failed: urma_recv_with_notify returned URMA error "
+                        "(len=%u, chunk_count=%lu, client_key=%u).",
+                        len,
+                        chunks_num,
+                        client_key);
+            // 如果recv提交失败，应该直接标记整个请求完成，唤醒等待线程，并不要求后续task执行完成，避免死锁
+            pthread_mutex_lock(&sync_handle->mutex);
+            sync_handle->request_completed = 1;
+            pthread_cond_signal(&sync_handle->cond);
+            pthread_mutex_unlock(&sync_handle->mutex);
+            return -1;
+        }
     }
+
     return 0;
 }
 
