@@ -164,13 +164,13 @@ static WorkerThread* select_best_worker(ThreadPoolHandle pool) {
     for (int i = 0; i < 64; i++) {
         WorkerThread* w = &pool->workers[i];
         pthread_mutex_lock(&w->mutex);
-        if (w->state == WORKER_STATE_IDLE) {
+        uint32_t load = w->queue_size;
+        if (w->state == WORKER_STATE_IDLE && load == 0) {
             best = w;
             pthread_mutex_unlock(&w->mutex);
             break;
         }
         if (w->state == WORKER_STATE_BUSY) {
-            uint32_t load = w->queue_size;
             if (load < min_load) {
                 min_load = load;
                 best = w;
